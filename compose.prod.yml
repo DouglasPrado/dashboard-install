@@ -1,0 +1,35 @@
+# Distribution compose — pulls the published image (no source on the client
+# host). The installer writes .env and pins DASHBOARD_IMAGE to a digest.
+# Dev keeps using compose.yml (build: .).
+services:
+  app:
+    image: ${DASHBOARD_IMAGE:-ghcr.io/douglasprado/dashboard:latest}
+    container_name: dashboard-app
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - API_PORT=3001
+      # Secure defaults for distribution. Auth is required (Camada 1): set
+      # TRUST_PROXY_AUTH=true behind Tailscale Serve, or DASHBOARD_PASSWORD.
+      - LICENSE_ENFORCE=true
+    volumes:
+      - ./data:/data
+      - /root/workspace:/workspace
+      # TODO Fase 2: trocar por socket-proxy (tecnativa/docker-socket-proxy) ro.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - stack_web
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.dashboard.rule=Host(`${DASHBOARD_HOST:?set DASHBOARD_HOST}`)
+      - traefik.http.routers.dashboard.entrypoints=web
+      # O server de produção serve SPA + API na mesma porta (3001); sem vite.
+      - traefik.http.services.dashboard.loadbalancer.server.port=3001
+
+networks:
+  stack_web:
+    external: true
