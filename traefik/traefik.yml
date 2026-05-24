@@ -1,0 +1,17 @@
+# Distribution Traefik config — routes by Docker labels on the stack_web network.
+# The API/dashboard (:8080) is intentionally NOT enabled here: never expose it
+# on a standalone host (see docs/RUNBOOK.md). HTTP only; terminate TLS at a
+# reverse proxy / Tailscale Serve if you need it.
+entryPoints:
+  web:
+    address: ":80"
+
+providers:
+  docker:
+    exposedByDefault: false
+    network: stack_web
+
+log:
+  level: INFO
+
+accessLog: {}

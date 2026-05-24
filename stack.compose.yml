@@ -1,0 +1,20 @@
+# Minimal shared stack for a standalone dashboard host: Traefik + the stack_web
+# network. The dashboard stores state in SQLite (data/*.db), so no postgres or
+# redis here. install.sh brings this up (project name "stack") only when the
+# stack_web network is absent.
+services:
+  traefik:
+    image: traefik:v3.5
+    container_name: stack-traefik
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+    networks:
+      - stack_web
+
+networks:
+  stack_web:
+    name: stack_web

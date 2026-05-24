@@ -1,29 +1,36 @@
 # dashboard-install
 
 Public bootstrap for the self-hosted **dashboard**. Holds only the installer
-(`install.sh`) and the distribution compose (`compose.prod.yml`) — **no source**.
-The dashboard itself ships as a published Docker image
-(`ghcr.io/douglasprado/dashboard`).
+and the compose/stack files — **no source**. The dashboard itself ships as a
+published Docker image (`ghcr.io/douglasprado/dashboard`).
 
-## One-liner
+- `install.sh` — the installer
+- `compose.prod.yml` — the dashboard service
+- `stack.compose.yml` + `traefik/traefik.yml` — minimal Traefik + `stack_web` network
+
+## One-liner (zero-arg, fresh host)
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/DouglasPrado/dashboard-install/main/install.sh \
-  | bash -s -- --host dash.example.ts.net --trust-proxy \
-      --image ghcr.io/douglasprado/dashboard:v0.1.0
+curl -sSL https://raw.githubusercontent.com/DouglasPrado/dashboard-install/main/install.sh | bash
 ```
 
-`bash -s --` forwards the flags to the piped script. The installer fetches
-`compose.prod.yml` from this repo, generates per-host secrets locally, writes
-`.env` (mode 600), pulls the image, and brings the stack up.
+Installs Docker (pinned 28.x), brings up Traefik + the `stack_web` network,
+fetches the compose files, pulls the image, starts the dashboard. With no flags
+it defaults the host to `dash.<primary-ip>.nip.io` and **generates a random
+basic-auth password**, printed at the end. The host is never exposed without
+auth.
 
-### Basic auth instead of Tailscale identity
+### Override defaults
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/DouglasPrado/dashboard-install/main/install.sh \
   | bash -s -- --host dash.192.168.3.139.nip.io --password 's3cret' \
       --image ghcr.io/douglasprado/dashboard:v0.1.0
 ```
+
+`bash -s --` forwards the flags. `--no-bootstrap` requires Docker + the stack
+already present (just installs the dashboard). `--trust-proxy` trusts a proxy
+identity header instead of a password.
 
 ## Don't pipe blind
 
