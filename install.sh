@@ -6,7 +6,10 @@
 # secrets locally (nothing is embedded in the distribution), installs the
 # license, and brings the stack up via compose.prod.yml. With bootstrap on
 # (default) it also installs Docker and the shared Traefik stack if missing,
-# so a fresh VM goes from zero to running in one command.
+# and provisions the host-side agent executor (the claude-bots user + its
+# authorized_keys + the claude CLI), so a fresh VM goes from zero to running
+# agents in one command. A one-time `claude /login` (via the UI) is still
+# needed before agents can run.
 #
 # Usage:
 #   curl -sSL .../install.sh | bash            # zero-arg on a fresh host
@@ -24,7 +27,8 @@
 #                        (DASHBOARD_ADMINS); not required to boot or to log in.
 #   --trust-proxy        Optional. Trust a reverse-proxy identity header as the
 #                        admin-role identity; not required to boot or to log in.
-#   --no-bootstrap       Don't install Docker or the stack; require them present.
+#   --no-bootstrap       Don't install Docker, the stack, or the executor user;
+#                        require them present.
 #   --dir <path>         Install directory (default: current directory).
 #   --check              Validate prerequisites and inputs, then exit (no changes).
 #   -h, --help           Show this help.
@@ -33,6 +37,8 @@ set -euo pipefail
 
 IMAGE_DEFAULT="ghcr.io/douglasprado/dashboard:latest"
 DOCKER_VERSION="28.5"   # pin: engine 29 raised the min API version; the stack's Traefik client is pinned to 1.24
+EXECUTOR_USER="claude-bots"   # host user the dashboard SSHes into to run `claude`
+CLAUDE_INSTALL_URL="https://claude.ai/install.sh"
 
 HOST=""
 LICENSE=""
@@ -87,6 +93,65 @@ ensure_stack() {
   fetch "stack.compose.yml" "$DIR/stack.compose.yml"
   fetch "traefik/traefik.yml" "$DIR/traefik/traefik.yml"
   ( cd "$DIR" && docker compose -p stack -f stack.compose.yml up -d ) || die "failed to bring up the stack"
+}
+
+# Provision the host-side agent executor: a dedicated `claude-bots` user the
+# dashboard SSHes into (host.docker.internal) to run `claude`. Without this a
+# fresh host can't run agents ("Claude Code não instalado"). Idempotent; gated
+# by bootstrap like docker/stack. Requires $SSH_KEY.pub to exist (key gen runs
+# first). A one-time `claude /login` is still needed afterwards, via the UI.
+ensure_executor() {
+  if [ "$BOOTSTRAP" != "true" ]; then
+    warn "skipping executor setup (--no-bootstrap); ensure user '$EXECUTOR_USER', its authorized_keys, and 'claude' on PATH exist on the host"
+    return 0
+  fi
+
+  # 1. executor user
+  if ! id "$EXECUTOR_USER" >/dev/null 2>&1; then
+    log "creating executor user $EXECUTOR_USER"
+    useradd -m -s /bin/bash "$EXECUTOR_USER" || die "failed to create user $EXECUTOR_USER"
+  fi
+  local home; home="$(getent passwd "$EXECUTOR_USER" | cut -d: -f6)"
+  [ -n "$home" ] && [ -d "$home" ] || die "could not resolve home dir for $EXECUTOR_USER"
+
+  # 2. authorize the dashboard's generated key (append-once, idempotent)
+  install -d -m 700 -o "$EXECUTOR_USER" -g "$EXECUTOR_USER" "$home/.ssh"
+  local ak="$home/.ssh/authorized_keys" pub
+  pub="$(cat "$SSH_KEY.pub")"
+  if [ ! -f "$ak" ] || ! grep -qF "$pub" "$ak"; then
+    printf '%s\n' "$pub" >> "$ak"
+    log "authorized dashboard key for $EXECUTOR_USER"
+  fi
+  chown "$EXECUTOR_USER:$EXECUTOR_USER" "$ak"; chmod 600 "$ak"
+
+  # 3. sshd must accept the container->host connection (over host-gateway)
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl enable --now ssh >/dev/null 2>&1 \
+      || systemctl enable --now sshd >/dev/null 2>&1 \
+      || warn "could not start sshd — start it so the dashboard can reach the host executor"
+  fi
+
+  # 4. claude CLI on a PATH the non-interactive ssh session sees. The native
+  # installer drops it in ~/.local/bin (not read by `ssh user@host '<cmd>'`),
+  # so symlink it onto /usr/local/bin.
+  if [ ! -x /usr/local/bin/claude ]; then
+    log "installing Claude Code CLI for $EXECUTOR_USER"
+    if runuser -u "$EXECUTOR_USER" -- bash -lc "curl -fsSL $CLAUDE_INSTALL_URL | bash"; then
+      local cbin="$home/.local/bin/claude"
+      if [ -x "$cbin" ]; then
+        ln -sf "$cbin" /usr/local/bin/claude
+      else
+        warn "claude installed but not at $cbin — add it to /usr/local/bin manually"
+      fi
+    else
+      warn "claude install failed — install it manually for $EXECUTOR_USER and symlink to /usr/local/bin/claude"
+    fi
+  fi
+
+  if [ -x /usr/local/bin/claude ]; then
+    log "executor ready: $EXECUTOR_USER + claude ($(/usr/local/bin/claude --version 2>/dev/null || echo 'version unknown'))"
+  fi
+  warn "one-time step: open the dashboard → Claude section → login (claude /login OAuth) before running agents"
 }
 
 while [ $# -gt 0 ]; do
@@ -145,8 +210,11 @@ if [ "$CHECK_ONLY" = "true" ]; then
   identity=""
   if [ -n "$PASSWORD" ]; then identity="password"; fi
   if [ "$TRUST_PROXY" = "true" ]; then identity="${identity:+$identity,}trust-proxy"; fi
+  exec_user_status="$(id "$EXECUTOR_USER" >/dev/null 2>&1 && echo present || echo "$([ "$BOOTSTRAP" = true ] && echo "absent (would create)" || echo "absent — agents won't run")")"
+  claude_status="$([ -x /usr/local/bin/claude ] && echo present || echo "$([ "$BOOTSTRAP" = true ] && echo "absent (would install)" || echo "absent — agents won't run")")"
   log "check: host=$HOST, image=$IMAGE, auth=license-session, identity=${identity:-none}, bootstrap=$BOOTSTRAP"
   log "       docker=$docker_status, stack_web=$net_status, compose=$compose_status"
+  log "       executor($EXECUTOR_USER)=$exec_user_status, claude=$claude_status"
   exit 0
 fi
 
@@ -171,9 +239,11 @@ SSH_KEY="$DIR/data/ssh/id_ed25519"
 if [ ! -f "$SSH_KEY" ]; then
   log "generating per-host SSH key"
   ssh-keygen -t ed25519 -N "" -f "$SSH_KEY" -C "dashboard@$HOST" >/dev/null
-  warn "add this public key to the host's authorized_keys for the executor user:"
-  cat "$SSH_KEY.pub"
+  log "generated executor SSH key"
 fi
+
+# ── host-side agent executor (claude-bots user + authorized_keys + claude CLI) ──
+ensure_executor
 
 # ── license ──
 if [ -n "$LICENSE" ]; then
@@ -208,3 +278,4 @@ if [ -n "$LICENSE" ]; then
 else
   log "open the dashboard; the first-run screen will ask for your license key"
 fi
+log "to run agents: dashboard → Claude section → login (one-time claude /login OAuth)"
