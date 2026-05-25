@@ -16,11 +16,20 @@ services:
       # DASHBOARD_PASSWORD / TRUST_PROXY_AUTH (in .env) only add an operator
       # identity for admin-role authz.
       - LICENSE_ENFORCE=true
+      # Agent executor: the dashboard SSHes into the host to run `claude` as the
+      # claude-bots user (provisioned by install.sh). These match ssh-exec.ts
+      # defaults; set explicitly so the contract is visible.
+      - SSH_HOST=host.docker.internal
+      - SSH_USER=claude-bots
     volumes:
       - ./data:/data
       - /root/workspace:/workspace
       # TODO Fase 2: trocar por socket-proxy (tecnativa/docker-socket-proxy) ro.
       - /var/run/docker.sock:/var/run/docker.sock:ro
+    # On Linux, host.docker.internal isn't resolvable by default; map it to the
+    # host gateway so the container can SSH back to the host executor.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     security_opt:
       - no-new-privileges:true
     networks:
