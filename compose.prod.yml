@@ -11,8 +11,10 @@ services:
     environment:
       - NODE_ENV=production
       - API_PORT=3001
-      # Secure defaults for distribution. Auth is required (Camada 1): set
-      # TRUST_PROXY_AUTH=true behind Tailscale Serve, or DASHBOARD_PASSWORD.
+      # Secure defaults for distribution. Every API route is gated behind a
+      # license-key session, so boot is safe without a password/proxy.
+      # DASHBOARD_PASSWORD / TRUST_PROXY_AUTH (in .env) only add an operator
+      # identity for admin-role authz.
       - LICENSE_ENFORCE=true
     volumes:
       - ./data:/data

@@ -14,11 +14,16 @@
 #
 # Options:
 #   --host <domain>      Host the dashboard is served at. Default: dash.<ip>.nip.io.
-#   --license <key>      License token, or a path to a file containing it.
+#   --license <key>      License token, or a path to a file containing it. The
+#                        license is the login credential — every route is gated
+#                        behind a license-key session. Omit to paste the key on
+#                        the first-run login screen instead.
 #   --image <ref>        Image to pull (default: ghcr.io/douglasprado/dashboard:latest).
 #                        Prefer a digest pin: ...@sha256:<digest>.
-#   --password <pw>      Basic-auth password. Omitted: a random one is generated.
-#   --trust-proxy        Trust a reverse-proxy identity header instead of a password.
+#   --password <pw>      Optional. Adds a basic-auth identity for admin-role authz
+#                        (DASHBOARD_ADMINS); not required to boot or to log in.
+#   --trust-proxy        Optional. Trust a reverse-proxy identity header as the
+#                        admin-role identity; not required to boot or to log in.
 #   --no-bootstrap       Don't install Docker or the stack; require them present.
 #   --dir <path>         Install directory (default: current directory).
 #   --check              Validate prerequisites and inputs, then exit (no changes).
@@ -37,13 +42,11 @@ TRUST_PROXY="false"
 BOOTSTRAP="true"
 DIR="$PWD"
 CHECK_ONLY="false"
-GEN_PASSWORD="false"
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mwarn:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 sha256() { command -v sha256sum >/dev/null 2>&1 && sha256sum "$1" | cut -d' ' -f1 || shasum -a 256 "$1" | cut -d' ' -f1; }
-gen_secret() { openssl rand -hex 16 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 detect_ip() { ip -4 -o route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1; }
 
 # Public bootstrap repo hosting install.sh, compose.prod.yml and the minimal
@@ -110,17 +113,12 @@ if [ -z "$HOST" ]; then
   log "no --host given; defaulting to $HOST"
 fi
 
-# ── auth: a password OR a trusted proxy header. With bootstrap on, an absent
-# choice means "generate a password" so the host is never exposed without auth.
-# Without bootstrap we refuse — the dashboard will not boot exposed unauthenticated.
-if [ -z "$PASSWORD" ] && [ "$TRUST_PROXY" != "true" ]; then
-  if [ "$BOOTSTRAP" = "true" ]; then
-    PASSWORD="$(gen_secret)"
-    GEN_PASSWORD="true"
-    log "no auth flag given; generated a dashboard password (shown at the end)"
-  else
-    die "set --password <pw> or --trust-proxy; the dashboard refuses to boot exposed without auth"
-  fi
+# ── auth: the license-key session gates every API route, so the dashboard boots
+# safe with no password/proxy. --password / --trust-proxy are optional and only
+# supply an operator identity for admin-role authz. Without a license nobody can
+# log in — warn, don't die, since the key can be pasted on the first-run screen.
+if [ -z "$LICENSE" ]; then
+  warn "no --license given; the dashboard will start at the first-run activation screen, where a valid license key is required to log in"
 fi
 
 COMPOSE_FILE="$DIR/compose.prod.yml"
@@ -144,9 +142,11 @@ if [ "$CHECK_ONLY" = "true" ]; then
   else
     compose_status="UNREACHABLE at $COMPOSE_URL"
   fi
-  log "check: host=$HOST, image=$IMAGE, auth=$([ "$TRUST_PROXY" = true ] && echo trust-proxy || echo password), bootstrap=$BOOTSTRAP"
+  identity=""
+  if [ -n "$PASSWORD" ]; then identity="password"; fi
+  if [ "$TRUST_PROXY" = "true" ]; then identity="${identity:+$identity,}trust-proxy"; fi
+  log "check: host=$HOST, image=$IMAGE, auth=license-session, identity=${identity:-none}, bootstrap=$BOOTSTRAP"
   log "       docker=$docker_status, stack_web=$net_status, compose=$compose_status"
-  [ -n "$LICENSE" ] || warn "no --license given; premium features will be locked under LICENSE_ENFORCE=true"
   exit 0
 fi
 
@@ -203,7 +203,8 @@ log "starting dashboard"
 ( cd "$DIR" && docker compose -f compose.prod.yml up -d )
 
 log "done. dashboard at http://$HOST  (health: /api/health)"
-if [ "$GEN_PASSWORD" = "true" ]; then
-  printf '\033[1;32m==> login: dashboard / %s\033[0m\n' "$PASSWORD"
-  warn "this password is also in $ENV_FILE — change it there and re-run 'docker compose -f compose.prod.yml up -d'"
+if [ -n "$LICENSE" ]; then
+  log "open the dashboard and log in with your license key"
+else
+  log "open the dashboard; the first-run screen will ask for your license key"
 fi
