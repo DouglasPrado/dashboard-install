@@ -49,6 +49,9 @@ jobs:
               # Push to main → latest
               version="latest"
             fi
+          elif [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            # Dispatched from dashboard → always latest
+            version="latest"
           else
             version="${{ github.event.inputs.tag }}"
           fi
