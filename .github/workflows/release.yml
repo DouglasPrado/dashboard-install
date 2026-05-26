@@ -5,13 +5,14 @@ name: release
 on:
   push:
     tags: ['v*']
-    branches: ['main']
   workflow_dispatch:
     inputs:
       tag:
         description: Image tag to publish (e.g. v0.2.0 or latest)
         required: true
         default: latest
+  repository_dispatch:
+    types: [build-from-dashboard]
 
 permissions:
   contents: read
