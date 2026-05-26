@@ -3,7 +3,7 @@
 # Dev keeps using compose.yml (build: .).
 services:
   app:
-    image: ${DASHBOARD_IMAGE:-ghcr.io/douglasprado/dashboard:latest}
+    image: ${DASHBOARD_IMAGE:-ghcr.io/douglasprado/dashboard-install:latest}
     container_name: dashboard-app
     restart: unless-stopped
     env_file:

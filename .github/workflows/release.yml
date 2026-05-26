@@ -1,0 +1,96 @@
+name: release
+
+# Build, scan and publish the distribution image to GHCR (dashboard-install repo).
+# Source is fetched from the private dashboard repo.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Image tag to publish (e.g. v0.2.0 or latest)
+        required: true
+        default: latest
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  # Published under dashboard-install (public repo), but built from dashboard (private)
+  IMAGE: ghcr.io/douglasprado/dashboard-install
+  DASHBOARD_REPO: DouglasPrado/dashboard
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout dashboard-install (for config)
+        uses: actions/checkout@v4
+        with:
+          path: dashboard-install
+
+      - name: Checkout dashboard (private, for source)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.DASHBOARD_REPO }}
+          token: ${{ secrets.DASHBOARD_REPO_TOKEN }} # PAT with repo access to dashboard
+          path: dashboard
+
+      - name: Resolve tags and image
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            version="${GITHUB_REF_NAME}"
+          else
+            version="${{ github.event.inputs.tag }}"
+          fi
+          echo "tag=$version" >> "$GITHUB_OUTPUT"
+          # Publish the version tag and, for a stable release, also move :latest.
+          # Skip :latest for pre-releases (e.g. v1.2.0-rc.1) and when the version
+          # already is "latest" (avoids a duplicate ref).
+          {
+            echo "tags<<EOF"
+            echo "$IMAGE:$version"
+            case "$version" in
+              latest|*-*) ;;
+              *) echo "$IMAGE:latest" ;;
+            esac
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: dashboard
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          provenance: true
+          sbom: true
+
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE }}@${{ steps.push.outputs.digest }}
+          format: table
+          exit-code: '1'
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+
+      - name: Report digest
+        run: |
+          echo "### Published image" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "$IMAGE@${{ steps.push.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "Pin DASHBOARD_IMAGE to the digest above in compose.prod.yml." >> "$GITHUB_STEP_SUMMARY"

@@ -35,7 +35,7 @@
 #
 set -euo pipefail
 
-IMAGE_DEFAULT="ghcr.io/douglasprado/dashboard:latest"
+IMAGE_DEFAULT="ghcr.io/douglasprado/dashboard-install:latest"
 DOCKER_VERSION="28.5"   # pin: engine 29 raised the min API version; the stack's Traefik client is pinned to 1.24
 EXECUTOR_USER="claude-bots"   # host user the dashboard SSHes into to run `claude`
 WORKSPACE_DIR="/root/workspace"   # where the image clones projects (hardcoded host path in clone-project.ts)
