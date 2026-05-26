@@ -55,6 +55,19 @@ die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 sha256() { command -v sha256sum >/dev/null 2>&1 && sha256sum "$1" | cut -d' ' -f1 || shasum -a 256 "$1" | cut -d' ' -f1; }
 detect_ip() { ip -4 -o route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1; }
 
+# True when something is listening on TCP :22 (the executor SSH endpoint the
+# dashboard reaches over host.docker.internal). Used to verify sshd actually
+# came up, since enabling it can silently no-op on minimal/LXC hosts.
+sshd_listening() {
+  if command -v ss >/dev/null 2>&1; then
+    [ -n "$(ss -ltnH 'sport = :22' 2>/dev/null)" ]
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -ltn 2>/dev/null | grep -qE '[:.]22[[:space:]]'
+  else
+    return 1
+  fi
+}
+
 # Public bootstrap repo hosting install.sh, compose.prod.yml and the minimal
 # Traefik stack. Piped installs fetch these from here. Override with
 # BOOTSTRAP_BASE for a fork or a pinned ref.
@@ -124,11 +137,45 @@ ensure_executor() {
   fi
   chown "$EXECUTOR_USER:$EXECUTOR_USER" "$ak"; chmod 600 "$ak"
 
-  # 3. sshd must accept the container->host connection (over host-gateway)
-  if command -v systemctl >/dev/null 2>&1; then
-    systemctl enable --now ssh >/dev/null 2>&1 \
-      || systemctl enable --now sshd >/dev/null 2>&1 \
-      || warn "could not start sshd — start it so the dashboard can reach the host executor"
+  # 3. sshd must accept the container->host connection (over host-gateway). A
+  #    fresh VM may ship no openssh-server, no host keys, or no working init
+  #    (minimal LXC), so each step is best-effort and the result is verified on
+  #    :22 at the end — a refused connection here is the #1 reason clone/agents
+  #    fail with "connect to host host.docker.internal port 22: Connection refused".
+  if ! command -v sshd >/dev/null 2>&1 && [ ! -x /usr/sbin/sshd ]; then
+    if command -v apt-get >/dev/null 2>&1; then
+      log "installing openssh-server"
+      # Refresh the index first — a fresh VM's apt cache is often empty, which
+      # makes the install fail with "Unable to locate package openssh-server".
+      apt-get update -qq >/dev/null 2>&1 || warn "apt-get update failed; openssh-server install may not find the package"
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server >/dev/null 2>&1 \
+        || warn "failed to install openssh-server — install an SSH server so the dashboard can reach the host executor"
+    else
+      warn "sshd not found and apt-get unavailable — install an SSH server so the dashboard can reach the host executor"
+    fi
+  fi
+
+  # Host keys: a partial/failed install can leave sshd unable to start. Generate
+  # any that are missing (no-op when they already exist).
+  if command -v sshd >/dev/null 2>&1 || [ -x /usr/sbin/sshd ]; then
+    ls /etc/ssh/ssh_host_*_key >/dev/null 2>&1 || ssh-keygen -A >/dev/null 2>&1 || true
+  fi
+
+  # Start sshd, trying init systems in order: systemd, SysV/service, then the
+  # daemon directly (minimal LXC images often have no working init manager).
+  if ! sshd_listening && command -v systemctl >/dev/null 2>&1 && systemctl list-units >/dev/null 2>&1; then
+    systemctl enable --now ssh >/dev/null 2>&1 || systemctl enable --now sshd >/dev/null 2>&1 || true
+  fi
+  if ! sshd_listening; then
+    service ssh start >/dev/null 2>&1 || service sshd start >/dev/null 2>&1 || true
+  fi
+  if ! sshd_listening && [ -x /usr/sbin/sshd ]; then
+    /usr/sbin/sshd >/dev/null 2>&1 || true
+  fi
+  if sshd_listening; then
+    log "sshd listening on :22 (executor reachable)"
+  else
+    warn "sshd is NOT listening on :22 — the dashboard's SSH to host.docker.internal will be refused and clone/agents won't run; start an SSH server on the host manually"
   fi
 
   # 4. claude CLI on a PATH the non-interactive ssh session sees. The native
@@ -212,9 +259,16 @@ if [ "$CHECK_ONLY" = "true" ]; then
   if [ "$TRUST_PROXY" = "true" ]; then identity="${identity:+$identity,}trust-proxy"; fi
   exec_user_status="$(id "$EXECUTOR_USER" >/dev/null 2>&1 && echo present || echo "$([ "$BOOTSTRAP" = true ] && echo "absent (would create)" || echo "absent — agents won't run")")"
   claude_status="$([ -x /usr/local/bin/claude ] && echo present || echo "$([ "$BOOTSTRAP" = true ] && echo "absent (would install)" || echo "absent — agents won't run")")"
+  if sshd_listening; then
+    sshd_status="listening :22"
+  elif command -v sshd >/dev/null 2>&1 || [ -x /usr/sbin/sshd ]; then
+    sshd_status="$([ "$BOOTSTRAP" = true ] && echo "installed, not listening (would start)" || echo "installed, NOT listening — clone/agents refused")"
+  else
+    sshd_status="$([ "$BOOTSTRAP" = true ] && echo "absent (would install)" || echo "absent — clone/agents won't run")"
+  fi
   log "check: host=$HOST, image=$IMAGE, auth=license-session, identity=${identity:-none}, bootstrap=$BOOTSTRAP"
   log "       docker=$docker_status, stack_web=$net_status, compose=$compose_status"
-  log "       executor($EXECUTOR_USER)=$exec_user_status, claude=$claude_status"
+  log "       executor($EXECUTOR_USER)=$exec_user_status, sshd=$sshd_status, claude=$claude_status"
   exit 0
 fi
 
