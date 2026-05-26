@@ -38,6 +38,7 @@ set -euo pipefail
 IMAGE_DEFAULT="ghcr.io/douglasprado/dashboard:latest"
 DOCKER_VERSION="28.5"   # pin: engine 29 raised the min API version; the stack's Traefik client is pinned to 1.24
 EXECUTOR_USER="claude-bots"   # host user the dashboard SSHes into to run `claude`
+WORKSPACE_DIR="/root/workspace"   # where the image clones projects (hardcoded host path in clone-project.ts)
 CLAUDE_INSTALL_URL="https://claude.ai/install.sh"
 
 HOST=""
@@ -136,6 +137,21 @@ ensure_executor() {
     log "authorized dashboard key for $EXECUTOR_USER"
   fi
   chown "$EXECUTOR_USER:$EXECUTOR_USER" "$ak"; chmod 600 "$ak"
+
+  # 2b. workspace ownership: the dashboard clones projects into $WORKSPACE_DIR
+  #     (a host path hardcoded in the image) but runs git as the non-root
+  #     executor over SSH. Without ownership + traverse into /root, clone fails
+  #     with exit 128 "could not create leading directories ... Permission denied".
+  mkdir -p "$WORKSPACE_DIR"
+  chown "$EXECUTOR_USER:$EXECUTOR_USER" "$WORKSPACE_DIR"
+  # /root is mode 700; grant the executor traverse (x) without exposing a listing.
+  # Prefer a targeted ACL; fall back to o+x (any local user can traverse, not read).
+  if command -v setfacl >/dev/null 2>&1 && setfacl -m "u:$EXECUTOR_USER:x" /root 2>/dev/null; then
+    :
+  else
+    chmod o+x /root
+  fi
+  log "workspace $WORKSPACE_DIR owned by $EXECUTOR_USER (executor can clone)"
 
   # 3. sshd must accept the container->host connection (over host-gateway). A
   #    fresh VM may ship no openssh-server, no host keys, or no working init
@@ -268,7 +284,8 @@ if [ "$CHECK_ONLY" = "true" ]; then
   fi
   log "check: host=$HOST, image=$IMAGE, auth=license-session, identity=${identity:-none}, bootstrap=$BOOTSTRAP"
   log "       docker=$docker_status, stack_web=$net_status, compose=$compose_status"
-  log "       executor($EXECUTOR_USER)=$exec_user_status, sshd=$sshd_status, claude=$claude_status"
+  ws_status="$([ -d "$WORKSPACE_DIR" ] && echo "owner=$(stat -c '%U' "$WORKSPACE_DIR" 2>/dev/null || echo '?')" || echo "$([ "$BOOTSTRAP" = true ] && echo "absent (would create)" || echo "absent — clone fails")")"
+  log "       executor($EXECUTOR_USER)=$exec_user_status, sshd=$sshd_status, claude=$claude_status, workspace=$ws_status"
   exit 0
 fi
 
