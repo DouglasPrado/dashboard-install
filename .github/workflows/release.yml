@@ -5,6 +5,7 @@ name: release
 on:
   push:
     tags: ['v*']
+    branches: ['main']
   workflow_dispatch:
     inputs:
       tag:
@@ -41,7 +42,12 @@ jobs:
         id: meta
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
-            version="${GITHUB_REF_NAME}"
+            if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+              version="${GITHUB_REF_NAME}"
+            else
+              # Push to main → latest
+              version="latest"
+            fi
           else
             version="${{ github.event.inputs.tag }}"
           fi
