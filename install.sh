@@ -124,7 +124,19 @@ ensure_executor() {
   fi
   chown "$EXECUTOR_USER:$EXECUTOR_USER" "$ak"; chmod 600 "$ak"
 
-  # 3. sshd must accept the container->host connection (over host-gateway)
+  # 3. sshd must accept the container->host connection (over host-gateway).
+  #    A fresh VM may not ship openssh-server at all; without it the systemctl
+  #    enable below is a silent no-op and the executor is unreachable (the
+  #    dashboard's SSH to host.docker.internal is refused). Install it first.
+  if ! command -v sshd >/dev/null 2>&1 && [ ! -x /usr/sbin/sshd ]; then
+    if command -v apt-get >/dev/null 2>&1; then
+      log "installing openssh-server"
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server >/dev/null 2>&1 \
+        || warn "failed to install openssh-server — install an SSH server so the dashboard can reach the host executor"
+    else
+      warn "sshd not found and apt-get unavailable — install an SSH server so the dashboard can reach the host executor"
+    fi
+  fi
   if command -v systemctl >/dev/null 2>&1; then
     systemctl enable --now ssh >/dev/null 2>&1 \
       || systemctl enable --now sshd >/dev/null 2>&1 \
@@ -212,9 +224,10 @@ if [ "$CHECK_ONLY" = "true" ]; then
   if [ "$TRUST_PROXY" = "true" ]; then identity="${identity:+$identity,}trust-proxy"; fi
   exec_user_status="$(id "$EXECUTOR_USER" >/dev/null 2>&1 && echo present || echo "$([ "$BOOTSTRAP" = true ] && echo "absent (would create)" || echo "absent — agents won't run")")"
   claude_status="$([ -x /usr/local/bin/claude ] && echo present || echo "$([ "$BOOTSTRAP" = true ] && echo "absent (would install)" || echo "absent — agents won't run")")"
+  sshd_status="$( { command -v sshd >/dev/null 2>&1 || [ -x /usr/sbin/sshd ]; } && echo present || echo "$([ "$BOOTSTRAP" = true ] && echo "absent (would install)" || echo "absent — agents won't run")")"
   log "check: host=$HOST, image=$IMAGE, auth=license-session, identity=${identity:-none}, bootstrap=$BOOTSTRAP"
   log "       docker=$docker_status, stack_web=$net_status, compose=$compose_status"
-  log "       executor($EXECUTOR_USER)=$exec_user_status, claude=$claude_status"
+  log "       executor($EXECUTOR_USER)=$exec_user_status, sshd=$sshd_status, claude=$claude_status"
   exit 0
 fi
 
