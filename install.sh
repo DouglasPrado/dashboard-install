@@ -11,6 +11,10 @@
 # agents in one command. A one-time `claude /login` (via the UI) is still
 # needed before agents can run.
 #
+# Platforms: bootstrap (the default) provisions a Linux host executor and runs
+# on Linux only. macOS/other Unix: pre-provision the executor and use
+# --no-bootstrap. Windows: run inside WSL2 (Docker Desktop's WSL2 backend).
+#
 # Usage:
 #   curl -sSL .../install.sh | bash            # zero-arg on a fresh host
 #   ./install.sh --host dash.example.com --license <key> [options]
@@ -443,6 +447,18 @@ if [ "$CHECK_ONLY" = "true" ]; then
   log "       executor($EXECUTOR_USER)=$exec_user_status, sshd=$sshd_status, workspace=$ws_status"
   log "       runtimes: $runtimes_status"
   exit 0
+fi
+
+# ── host OS guard: bootstrap provisions a Linux host executor (dedicated user
+# via useradd, sshd over host-gateway, runtimes symlinked onto /usr/local/bin).
+# That path is Linux-specific. --no-bootstrap is OS-agnostic (just docker compose
+# up against a pre-provisioned executor), so only block bootstrap on non-Linux. ──
+OS="$(uname -s 2>/dev/null || echo unknown)"
+if [ "$BOOTSTRAP" = "true" ] && [ "$OS" != "Linux" ]; then
+  case "$OS" in
+    Darwin) die "host provisioning (bootstrap) is Linux-only — the executor model uses useradd, sshd and /usr/local/bin symlinks. On macOS: pre-provision the '$EXECUTOR_USER' user (authorized_keys + runtimes on PATH) and re-run with --no-bootstrap, or run the dashboard on a Linux VM." ;;
+    *)      die "unsupported host OS '$OS' for bootstrap. On Windows, run inside WSL2 (Ubuntu) — Docker Desktop's WSL2 backend is the Linux host the dashboard SSHes into. Native Windows is not supported; pre-provision and use --no-bootstrap on other Unix hosts." ;;
+  esac
 fi
 
 # ── bootstrap: Docker, then the shared stack ──
