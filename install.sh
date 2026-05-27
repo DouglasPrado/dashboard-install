@@ -141,12 +141,30 @@ runtime_spec() { # <runtime-id>
 # symlink onto /usr/local/bin. Try the login shell's PATH first (sources rc
 # files the installer edits), then known install dirs. Prints the path on stdout.
 resolve_runtime_bin() { # <binary> <home>
-  local bin="$1" home="$2" p
+  local bin="$1" home="$2" p cand
+  # 1. login shell PATH (sources the rc files the installer edits) — the
+  #    installer-blessed path, robust to future install-dir changes.
   p="$(runuser -u "$EXECUTOR_USER" -- bash -lc "command -v $bin" 2>/dev/null)" || true
   if [ -n "$p" ] && [ -x "$p" ]; then printf '%s' "$p"; return 0; fi
-  for p in "$home/.local/bin/$bin" "$home/.opencode/bin/$bin" "$home/.codex/bin/$bin" "$home/.cursor/bin/$bin" "$home/bin/$bin"; do
+  # 2. known fixed install dirs across the native installers. The codex
+  #    standalone installer nests the binary under packages/standalone/current.
+  for p in \
+    "$home/.local/bin/$bin" \
+    "$home/.opencode/bin/$bin" \
+    "$home/.codex/bin/$bin" \
+    "$home/.codex/packages/standalone/current/bin/$bin" \
+    "$home/.cursor/bin/$bin" \
+    "$home/bin/$bin"; do
     [ -x "$p" ] && { printf '%s' "$p"; return 0; }
   done
+  # 3. versioned dirs (cursor drops the binary under versions/<ver>/). The glob
+  #    sorts lexically and version dirs are date-stamped, so the last match is
+  #    the newest.
+  p=""
+  for cand in "$home"/.local/share/cursor-agent/versions/*/"$bin"; do
+    [ -x "$cand" ] && p="$cand"
+  done
+  if [ -n "$p" ] && [ -x "$p" ]; then printf '%s' "$p"; return 0; fi
   return 1
 }
 
