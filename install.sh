@@ -29,6 +29,9 @@
 #                        admin-role identity; not required to boot or to log in.
 #   --no-bootstrap       Don't install Docker, the stack, or the executor user;
 #                        require them present.
+#   --runtimes <list>    Comma-separated agent runtime CLIs to install for the
+#                        executor. Default: claude-code,opencode,codex. Known:
+#                        claude-code, opencode, codex, cursor (cursor is wip).
 #   --dir <path>         Install directory (default: current directory).
 #   --check              Validate prerequisites and inputs, then exit (no changes).
 #   -h, --help           Show this help.
@@ -37,9 +40,19 @@ set -euo pipefail
 
 IMAGE_DEFAULT="ghcr.io/douglasprado/dashboard-install:latest"
 DOCKER_VERSION="28.5"   # pin: engine 29 raised the min API version; the stack's Traefik client is pinned to 1.24
-EXECUTOR_USER="claude-bots"   # host user the dashboard SSHes into to run `claude`
+EXECUTOR_USER="claude-bots"   # host user the dashboard SSHes into to run agent CLIs
 WORKSPACE_DIR="/root/workspace"   # where the image clones projects (hardcoded host path in clone-project.ts)
+
+# Agent runtime CLIs the dashboard can drive (see server/runtime-adapter/registry.ts).
+# Each maps an id → install command; the resolved binary is symlinked onto
+# /usr/local/bin so the non-interactive ssh executor session sees it.
 CLAUDE_INSTALL_URL="https://claude.ai/install.sh"
+OPENCODE_INSTALL_URL="https://opencode.ai/install"
+CODEX_INSTALL_URL="https://chatgpt.com/codex/install.sh"
+CURSOR_INSTALL_URL="https://cursor.com/install"
+# Default: the runtimes marked status=available in the registry. cursor is wip
+# there, so it's omitted by default but can be requested via --runtimes.
+RUNTIMES_DEFAULT="claude-code,opencode,codex"
 
 HOST=""
 LICENSE=""
@@ -49,6 +62,7 @@ TRUST_PROXY="false"
 BOOTSTRAP="true"
 DIR="$PWD"
 CHECK_ONLY="false"
+RUNTIMES="$RUNTIMES_DEFAULT"
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mwarn:\033[0m %s\n' "$*" >&2; }
@@ -109,11 +123,67 @@ ensure_stack() {
   ( cd "$DIR" && docker compose -p stack -f stack.compose.yml up -d ) || die "failed to bring up the stack"
 }
 
+# Map a runtime id to "<binary> <install-command>". Unknown id → non-zero.
+# Keep ids in sync with server/runtime-adapter/registry.ts.
+runtime_spec() { # <runtime-id>
+  case "$1" in
+    claude-code) echo "claude|curl -fsSL $CLAUDE_INSTALL_URL | bash" ;;
+    opencode)    echo "opencode|curl -fsSL $OPENCODE_INSTALL_URL | bash" ;;
+    codex)       echo "codex|curl -fsSL $CODEX_INSTALL_URL | sh" ;;
+    cursor)      echo "cursor-agent|curl -fsS $CURSOR_INSTALL_URL | bash" ;;
+    *)           return 1 ;;
+  esac
+}
+
+# Resolve where an installer dropped a binary for the executor user. The native
+# installers add it to ~/.local/bin (and runtime-specific dirs), none of which a
+# non-interactive `ssh user@host '<cmd>'` reads — so we resolve it here and
+# symlink onto /usr/local/bin. Try the login shell's PATH first (sources rc
+# files the installer edits), then known install dirs. Prints the path on stdout.
+resolve_runtime_bin() { # <binary> <home>
+  local bin="$1" home="$2" p
+  p="$(runuser -u "$EXECUTOR_USER" -- bash -lc "command -v $bin" 2>/dev/null)" || true
+  if [ -n "$p" ] && [ -x "$p" ]; then printf '%s' "$p"; return 0; fi
+  for p in "$home/.local/bin/$bin" "$home/.opencode/bin/$bin" "$home/.codex/bin/$bin" "$home/.cursor/bin/$bin" "$home/bin/$bin"; do
+    [ -x "$p" ] && { printf '%s' "$p"; return 0; }
+  done
+  return 1
+}
+
+# Install one runtime CLI for the executor user and symlink it onto
+# /usr/local/bin. Idempotent (skips when the symlink target exists). Non-fatal:
+# a failed runtime warns but doesn't abort the install — others may still work.
+install_runtime() { # <runtime-id>
+  local id="$1" spec bin cmd src
+  spec="$(runtime_spec "$id")" || { warn "unknown runtime '$id' — skipping (known: claude-code, opencode, codex, cursor)"; return 0; }
+  bin="${spec%%|*}"; cmd="${spec#*|}"
+
+  if [ -x "/usr/local/bin/$bin" ]; then
+    log "runtime $id present ($bin)"
+    return 0
+  fi
+
+  log "installing runtime $id ($bin) for $EXECUTOR_USER"
+  if ! runuser -u "$EXECUTOR_USER" -- bash -lc "$cmd"; then
+    warn "runtime $id install failed — install '$bin' manually for $EXECUTOR_USER and symlink to /usr/local/bin/$bin"
+    return 0
+  fi
+
+  local home; home="$(getent passwd "$EXECUTOR_USER" | cut -d: -f6)"
+  if src="$(resolve_runtime_bin "$bin" "$home")"; then
+    ln -sf "$src" "/usr/local/bin/$bin"
+    log "runtime $id ready: $bin -> $src"
+  else
+    warn "runtime $id installed but '$bin' not found on PATH or known dirs — add it to /usr/local/bin manually"
+  fi
+}
+
 # Provision the host-side agent executor: a dedicated `claude-bots` user the
-# dashboard SSHes into (host.docker.internal) to run `claude`. Without this a
-# fresh host can't run agents ("Claude Code não instalado"). Idempotent; gated
-# by bootstrap like docker/stack. Requires $SSH_KEY.pub to exist (key gen runs
-# first). A one-time `claude /login` is still needed afterwards, via the UI.
+# dashboard SSHes into (host.docker.internal) to run the agent runtime CLIs.
+# Without this a fresh host can't run agents ("Claude Code não instalado").
+# Idempotent; gated by bootstrap like docker/stack. Requires $SSH_KEY.pub to
+# exist (key gen runs first). Installs the runtimes named in $RUNTIMES. A
+# one-time per-runtime login (e.g. `claude /login`) is still needed afterwards.
 ensure_executor() {
   if [ "$BOOTSTRAP" != "true" ]; then
     warn "skipping executor setup (--no-bootstrap); ensure user '$EXECUTOR_USER', its authorized_keys, and 'claude' on PATH exist on the host"
@@ -194,27 +264,20 @@ ensure_executor() {
     warn "sshd is NOT listening on :22 — the dashboard's SSH to host.docker.internal will be refused and clone/agents won't run; start an SSH server on the host manually"
   fi
 
-  # 4. claude CLI on a PATH the non-interactive ssh session sees. The native
-  # installer drops it in ~/.local/bin (not read by `ssh user@host '<cmd>'`),
-  # so symlink it onto /usr/local/bin.
-  if [ ! -x /usr/local/bin/claude ]; then
-    log "installing Claude Code CLI for $EXECUTOR_USER"
-    if runuser -u "$EXECUTOR_USER" -- bash -lc "curl -fsSL $CLAUDE_INSTALL_URL | bash"; then
-      local cbin="$home/.local/bin/claude"
-      if [ -x "$cbin" ]; then
-        ln -sf "$cbin" /usr/local/bin/claude
-      else
-        warn "claude installed but not at $cbin — add it to /usr/local/bin manually"
-      fi
-    else
-      warn "claude install failed — install it manually for $EXECUTOR_USER and symlink to /usr/local/bin/claude"
-    fi
-  fi
+  # 4. agent runtime CLIs on a PATH the non-interactive ssh session sees. The
+  # native installers drop binaries in ~/.local/bin (not read by `ssh
+  # user@host '<cmd>'`), so install_runtime symlinks each onto /usr/local/bin.
+  local rt
+  IFS=',' read -ra _runtimes <<< "$RUNTIMES"
+  for rt in "${_runtimes[@]}"; do
+    rt="$(echo "$rt" | tr -d '[:space:]')"
+    [ -n "$rt" ] && install_runtime "$rt"
+  done
 
   if [ -x /usr/local/bin/claude ]; then
     log "executor ready: $EXECUTOR_USER + claude ($(/usr/local/bin/claude --version 2>/dev/null || echo 'version unknown'))"
   fi
-  warn "one-time step: open the dashboard → Claude section → login (claude /login OAuth) before running agents"
+  warn "one-time step per runtime: log in before running agents (e.g. dashboard → Claude → login (claude /login OAuth); codex login / OPENAI_API_KEY; opencode auth)"
 }
 
 while [ $# -gt 0 ]; do
@@ -225,6 +288,7 @@ while [ $# -gt 0 ]; do
     --password)     PASSWORD="${2:-}"; shift 2 ;;
     --trust-proxy)  TRUST_PROXY="true"; shift ;;
     --no-bootstrap) BOOTSTRAP="false"; shift ;;
+    --runtimes)     RUNTIMES="${2:-}"; shift 2 ;;
     --dir)          DIR="${2:-}"; shift 2 ;;
     --check)        CHECK_ONLY="true"; shift ;;
     -h|--help)      usage; exit 0 ;;
@@ -274,7 +338,18 @@ if [ "$CHECK_ONLY" = "true" ]; then
   if [ -n "$PASSWORD" ]; then identity="password"; fi
   if [ "$TRUST_PROXY" = "true" ]; then identity="${identity:+$identity,}trust-proxy"; fi
   exec_user_status="$(id "$EXECUTOR_USER" >/dev/null 2>&1 && echo present || echo "$([ "$BOOTSTRAP" = true ] && echo "absent (would create)" || echo "absent — agents won't run")")"
-  claude_status="$([ -x /usr/local/bin/claude ] && echo present || echo "$([ "$BOOTSTRAP" = true ] && echo "absent (would install)" || echo "absent — agents won't run")")"
+  runtimes_status=""
+  IFS=',' read -ra _chk_runtimes <<< "$RUNTIMES"
+  for rt in "${_chk_runtimes[@]}"; do
+    rt="$(echo "$rt" | tr -d '[:space:]')"; [ -n "$rt" ] || continue
+    if spec="$(runtime_spec "$rt")"; then
+      bin="${spec%%|*}"
+      st="$([ -x "/usr/local/bin/$bin" ] && echo present || echo "$([ "$BOOTSTRAP" = true ] && echo "would install" || echo "absent")")"
+    else
+      st="unknown id"
+    fi
+    runtimes_status="${runtimes_status:+$runtimes_status, }$rt=$st"
+  done
   if sshd_listening; then
     sshd_status="listening :22"
   elif command -v sshd >/dev/null 2>&1 || [ -x /usr/sbin/sshd ]; then
@@ -285,7 +360,8 @@ if [ "$CHECK_ONLY" = "true" ]; then
   log "check: host=$HOST, image=$IMAGE, auth=license-session, identity=${identity:-none}, bootstrap=$BOOTSTRAP"
   log "       docker=$docker_status, stack_web=$net_status, compose=$compose_status"
   ws_status="$([ -d "$WORKSPACE_DIR" ] && echo "owner=$(stat -c '%U' "$WORKSPACE_DIR" 2>/dev/null || echo '?')" || echo "$([ "$BOOTSTRAP" = true ] && echo "absent (would create)" || echo "absent — clone fails")")"
-  log "       executor($EXECUTOR_USER)=$exec_user_status, sshd=$sshd_status, claude=$claude_status, workspace=$ws_status"
+  log "       executor($EXECUTOR_USER)=$exec_user_status, sshd=$sshd_status, workspace=$ws_status"
+  log "       runtimes: $runtimes_status"
   exit 0
 fi
 
