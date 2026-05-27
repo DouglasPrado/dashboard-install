@@ -135,6 +135,30 @@ runtime_spec() { # <runtime-id>
   esac
 }
 
+# Map a runtime id to "<auth-probe-relpath>|<login-command>". The probe is a
+# file under the executor home whose presence means the runtime is logged in;
+# empty = no CLI probe (auth is env/OAuth, status unknown). The login command
+# is interactive (OAuth/API key) and is run AS the executor user.
+runtime_login_spec() { # <runtime-id>
+  case "$1" in
+    claude-code) echo ".claude/.credentials.json|claude /login" ;;
+    opencode)    echo ".local/share/opencode/auth.json|opencode auth login" ;;
+    codex)       echo ".codex/auth.json|codex login" ;;
+    cursor)      echo "|cursor-agent login" ;;
+    *)           return 1 ;;
+  esac
+}
+
+# True when the runtime's auth probe file exists under the executor home. An
+# empty probe → unknown → reported as not-authed (non-zero) so the login hint
+# is still surfaced.
+runtime_authed() { # <runtime-id> <home>
+  local lspec probe
+  lspec="$(runtime_login_spec "$1")" || return 1
+  probe="${lspec%%|*}"
+  [ -n "$probe" ] && [ -f "$2/$probe" ]
+}
+
 # Resolve where an installer dropped a binary for the executor user. The native
 # installers add it to ~/.local/bin (and runtime-specific dirs), none of which a
 # non-interactive `ssh user@host '<cmd>'` reads — so we resolve it here and
@@ -295,7 +319,35 @@ ensure_executor() {
   if [ -x /usr/local/bin/claude ]; then
     log "executor ready: $EXECUTOR_USER + claude ($(/usr/local/bin/claude --version 2>/dev/null || echo 'version unknown'))"
   fi
-  warn "one-time step per runtime: log in before running agents (e.g. dashboard → Claude → login (claude /login OAuth); codex login / OPENAI_API_KEY; opencode auth)"
+
+  # 5. guided login. Agent auth is OAuth/API-key (interactive) — it can't be
+  # fully automated — so report per-runtime auth status and the exact login
+  # command, and when run from a TTY offer to drop into each missing login now
+  # (as the executor user). Piped installs (curl | bash) are non-interactive and
+  # just print the commands.
+  log "runtime login status (one-time per runtime):"
+  local rt2 spec2 bin2 lspec2 lcmd2 ans
+  IFS=',' read -ra _login_runtimes <<< "$RUNTIMES"
+  for rt2 in "${_login_runtimes[@]}"; do
+    rt2="$(echo "$rt2" | tr -d '[:space:]')"; [ -n "$rt2" ] || continue
+    spec2="$(runtime_spec "$rt2")" || continue
+    bin2="${spec2%%|*}"
+    [ -x "/usr/local/bin/$bin2" ] || continue   # not installed; nothing to log in
+    lspec2="$(runtime_login_spec "$rt2")" || { log "  $rt2: authenticated (no probe)"; continue; }
+    lcmd2="${lspec2#*|}"
+    if runtime_authed "$rt2" "$home"; then
+      log "  $rt2: authenticated"
+      continue
+    fi
+    warn "  $rt2: NOT authenticated — run as $EXECUTOR_USER: $lcmd2"
+    if [ -t 0 ] && [ -t 1 ]; then
+      printf '       log in to %s now? [y/N] ' "$rt2"
+      ans=""; read -r ans </dev/tty 2>/dev/null || ans=""
+      case "$ans" in
+        y|Y) runuser -u "$EXECUTOR_USER" -- bash -lc "$lcmd2" || warn "  $rt2 login failed or cancelled" ;;
+      esac
+    fi
+  done
 }
 
 while [ $# -gt 0 ]; do
@@ -356,13 +408,23 @@ if [ "$CHECK_ONLY" = "true" ]; then
   if [ -n "$PASSWORD" ]; then identity="password"; fi
   if [ "$TRUST_PROXY" = "true" ]; then identity="${identity:+$identity,}trust-proxy"; fi
   exec_user_status="$(id "$EXECUTOR_USER" >/dev/null 2>&1 && echo present || echo "$([ "$BOOTSTRAP" = true ] && echo "absent (would create)" || echo "absent — agents won't run")")"
+  chk_home="$(getent passwd "$EXECUTOR_USER" 2>/dev/null | cut -d: -f6)"
   runtimes_status=""
   IFS=',' read -ra _chk_runtimes <<< "$RUNTIMES"
   for rt in "${_chk_runtimes[@]}"; do
     rt="$(echo "$rt" | tr -d '[:space:]')"; [ -n "$rt" ] || continue
     if spec="$(runtime_spec "$rt")"; then
       bin="${spec%%|*}"
-      st="$([ -x "/usr/local/bin/$bin" ] && echo present || echo "$([ "$BOOTSTRAP" = true ] && echo "would install" || echo "absent")")"
+      if [ -x "/usr/local/bin/$bin" ]; then
+        # Installed: also report login state so --check shows what still needs auth.
+        if [ -n "$chk_home" ] && runtime_authed "$rt" "$chk_home"; then
+          st="present, authed"
+        else
+          st="present, NOT authed"
+        fi
+      else
+        st="$([ "$BOOTSTRAP" = true ] && echo "would install" || echo "absent")"
+      fi
     else
       st="unknown id"
     fi

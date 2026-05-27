@@ -16,8 +16,8 @@ INSTALL_SH="$SCRIPT_DIR/../install.sh"
 EXECUTOR_USER="test-user"
 runuser() { return 1; }
 
-# Source only resolve_runtime_bin from install.sh (the rest runs main on load).
-eval "$(sed -n '/^resolve_runtime_bin()/,/^}/p' "$INSTALL_SH")"
+# Source only the pure functions under test (the rest runs main on load).
+eval "$(sed -n '/^resolve_runtime_bin()/,/^}/p; /^runtime_login_spec()/,/^}/p; /^runtime_authed()/,/^}/p' "$INSTALL_SH")"
 
 fails=0
 assert_resolves() { # <label> <binary> <home> <expected-path>
@@ -52,6 +52,25 @@ assert_resolves "cursor-agent in versions/<ver>" cursor-agent "$H" \
 mkbin "$H/.local/share/cursor-agent/versions/2026.06.01-def/cursor-agent"
 assert_resolves "cursor-agent newest version wins" cursor-agent "$H" \
   "$H/.local/share/cursor-agent/versions/2026.06.01-def/cursor-agent"
+
+assert_authed() {   # <label> <runtime-id> <home>
+  local label="$1" rt="$2" home="$3"
+  if runtime_authed "$rt" "$home"; then printf 'ok   %s\n' "$label"
+  else printf 'FAIL %s (expected authed)\n' "$label"; fails=$((fails + 1)); fi
+}
+assert_not_authed() { # <label> <runtime-id> <home>
+  local label="$1" rt="$2" home="$3"
+  if runtime_authed "$rt" "$home"; then printf 'FAIL %s (expected NOT authed)\n' "$label"; fails=$((fails + 1))
+  else printf 'ok   %s\n' "$label"; fi
+}
+
+# runtime_authed: probe file present → authed
+mkdir -p "$H/.claude"; : > "$H/.claude/.credentials.json"
+assert_authed "claude-code authed when creds present" claude-code "$H"
+# probe file absent → not authed
+assert_not_authed "codex not authed without auth.json" codex "$H"
+# empty probe (cursor) → always not authed (status unknown)
+assert_not_authed "cursor not authed (no probe)" cursor "$H"
 
 if [ "$fails" -eq 0 ]; then
   echo "PASS (all)"
