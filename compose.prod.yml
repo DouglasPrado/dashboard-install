@@ -21,9 +21,16 @@ services:
       # defaults; set explicitly so the contract is visible.
       - SSH_HOST=host.docker.internal
       - SSH_USER=claude-bots
+      # Pin the license file under /data (matches the ./data:/data mount).
+      # Required for older images whose default still resolves via process.cwd().
+      - LICENSE_FILE=/data/license.key
     volumes:
       - ./data:/data
       - /root/workspace:/workspace
+      # Executor home — server/claude.ts reads transcripts, plans, sessions,
+      # history and settings from /claude/* (mapped to ~claude-bots/.claude).
+      # Without this bind, the chat panel renders empty even after `claude /login`.
+      - /home/claude-bots/.claude:/claude
       # TODO Fase 2: trocar por socket-proxy (tecnativa/docker-socket-proxy) ro.
       - /var/run/docker.sock:/var/run/docker.sock:ro
     # On Linux, host.docker.internal isn't resolvable by default; map it to the
