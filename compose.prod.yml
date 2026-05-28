@@ -21,6 +21,9 @@ services:
       # defaults; set explicitly so the contract is visible.
       - SSH_HOST=host.docker.internal
       - SSH_USER=claude-bots
+      # Pin the license file under /data (matches the ./data:/data mount).
+      # Required for older images whose default still resolves via process.cwd().
+      - LICENSE_FILE=/data/license.key
     volumes:
       - ./data:/data
       - /root/workspace:/workspace

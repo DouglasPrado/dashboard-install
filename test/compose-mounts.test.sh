@@ -41,6 +41,11 @@ assert_grep "/root/workspace mounted at /workspace" \
 assert_grep "host.docker.internal mapped to host-gateway" \
   'host\.docker\.internal:host-gateway'
 
+# License file path pinned under /data (matches ./data:/data mount). Belt and
+# suspenders for older images whose default still resolves via process.cwd().
+assert_grep "LICENSE_FILE pinned to /data/license.key" \
+  '^\s*-\s*LICENSE_FILE=/data/license\.key\s*$'
+
 if [ "$fails" -eq 0 ]; then
   echo "PASS (all)"
   exit 0
