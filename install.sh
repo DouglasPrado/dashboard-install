@@ -100,6 +100,17 @@ fetch() { # <relpath> <dest>
   curl -fsSL "$BOOTSTRAP_BASE/$1" -o "$2" || die "failed to fetch $1 from $BOOTSTRAP_BASE"
 }
 
+# Preflight: bootstrap mutates root-owned state (useradd, apt-get install,
+# systemctl, /usr/local/bin symlinks, chown of $WORKSPACE_DIR, traverse on
+# /root) and will half-run as a non-root user — leaving orphan files like
+# data/id_ed25519 owned by the calling uid that the next sudo retry inherits
+# and chokes on. Fail fast here with the exact escape hatches instead.
+require_root_for_bootstrap() {
+  [ "$BOOTSTRAP" = "true" ] || return 0
+  [ "$(id -u)" -eq 0 ] && return 0
+  die "bootstrap requires root — re-run with sudo (sudo ./install.sh ...), or pass --no-bootstrap to skip Docker install, the shared stack, and executor user setup (in which case '$EXECUTOR_USER', its authorized_keys, and the runtime CLIs on PATH must already be provisioned)"
+}
+
 # Install Docker + Compose v2 if missing (pinned). No-op when already present.
 ensure_docker() {
   if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
@@ -460,6 +471,9 @@ if [ "$BOOTSTRAP" = "true" ] && [ "$OS" != "Linux" ]; then
     *)      die "unsupported host OS '$OS' for bootstrap. On Windows, run inside WSL2 (Ubuntu) — Docker Desktop's WSL2 backend is the Linux host the dashboard SSHes into. Native Windows is not supported; pre-provision and use --no-bootstrap on other Unix hosts." ;;
   esac
 fi
+
+# ── root preflight: stop a bootstrap-as-non-root invocation BEFORE side effects ──
+require_root_for_bootstrap
 
 # ── bootstrap: Docker, then the shared stack ──
 ensure_docker
