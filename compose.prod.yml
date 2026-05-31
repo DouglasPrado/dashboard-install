@@ -39,6 +39,17 @@ services:
       - "host.docker.internal:host-gateway"
     security_opt:
       - no-new-privileges:true
+    # Runtime least-privilege (defense-in-depth). Limits blast radius if the
+    # process is compromised (dependency RCE, an agent escaping, prompt-injection
+    # escalation); it does NOT stop a root-on-host operator from extracting the
+    # image. read-only rootfs is safe because the app writes only under /data
+    # (the bind above: SQLite, license.key, ssh key) and /tmp (tmpfs below).
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    pids_limit: 512
     networks:
       - stack_web
     labels:
