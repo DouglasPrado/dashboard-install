@@ -78,6 +78,41 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Build → load locally → guard → scan → push. The guard and scan run on
+      # the local image BEFORE publication, so a bad image never reaches GHCR.
+      # (push happens in a separate step below; buildx caches the layers, so the
+      # second build is a near-instant cache hit on the same bytes.)
+      - name: Build image (load locally, do not publish yet)
+        uses: docker/build-push-action@v6
+        with:
+          context: dashboard
+          push: false
+          load: true
+          tags: dashboard-install:guard
+
+      # Fail the release if the image leaks source/sourcemap artifacts (the
+      # MINIFY+STRIP invariant). Inspect the exported filesystem from the runner
+      # rather than `find` inside — the runtime stage may be distroless (no
+      # shell). The banned-artifact contract lives in ci/check-image-artifacts.sh
+      # (unit-tested by test/image-guard.test.sh).
+      - name: Guard — no source/sourcemap artifacts in image
+        run: |
+          set -euo pipefail
+          cid="$(docker create dashboard-install:guard)"
+          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+          docker export "$cid" | tar -t > /tmp/img-files.txt
+          bash dashboard-install/ci/check-image-artifacts.sh < /tmp/img-files.txt
+
+      - name: Scan image with Trivy (vuln + secret, pre-publish)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: dashboard-install:guard
+          scanners: vuln,secret
+          format: table
+          exit-code: '1'
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+
       - name: Build and push
         id: push
         uses: docker/build-push-action@v6
@@ -87,15 +122,6 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           provenance: true
           sbom: true
-
-      - name: Scan image with Trivy
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: ${{ env.IMAGE }}@${{ steps.push.outputs.digest }}
-          format: table
-          exit-code: '1'
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
 
       - name: Report digest
         run: |
