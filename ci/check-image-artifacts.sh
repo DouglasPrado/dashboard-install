@@ -11,15 +11,17 @@
 # Single source of truth for the banned-artifact contract — unit-tested by
 # test/image-guard.test.sh and invoked from .github/workflows/release.yml.
 #
-# Strictness note: any *.ts (other than *.d.ts dep stubs) fails. If a dependency
-# ships raw .ts into the runtime stage, tighten the bundler/prune in the
-# dashboard repo's Dockerfile rather than loosening this guard.
+# Scope: OUR source only. Third-party deps are not our IP, and the runtime stage
+# copies prod node_modules wholesale (the server is esbuild-bundled with
+# --packages=external), so node_modules legitimately carries thousands of dep
+# .map/.ts/tsconfig files. Excluding node_modules avoids false positives while
+# still catching a leak of our dist/dist-server/src/server source.
 set -euo pipefail
 
 banned='(\.map$)|(\.tsx?$)|(/src/)|((^|/)tsconfig[^/]*\.json$)|((^|/)\.git/)|((^|/)\.env$)'
 
-# *.d.ts type stubs from dependencies are harmless and unavoidable; never source.
-matches="$(grep -E "$banned" - | grep -vE '\.d\.ts$' || true)"
+# Ignore third-party deps; *.d.ts type stubs are harmless and never source.
+matches="$(grep -vE '(^|/)node_modules/' - | grep -E "$banned" | grep -vE '\.d\.ts$' || true)"
 
 if [ -n "$matches" ]; then
   echo "::error::protection regression — banned source/sourcemap artifacts in image:" >&2

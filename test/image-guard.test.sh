@@ -34,10 +34,12 @@ assert_accepts() { # <label> <path>
   fi
 }
 
-# Banned — source, sourcemaps, build config, VCS, secrets.
+# Banned — OUR source, sourcemaps, build config, VCS, secrets.
 assert_rejects "sourcemap .map"       "app/dist/index.js.map"
+assert_rejects "server sourcemap"     "app/dist-server/index.js.map"
 assert_rejects "TS source .ts"        "app/src/server.ts"
 assert_rejects "TS source .tsx"       "app/src/App.tsx"
+assert_rejects "server/*.ts leak"     "app/server/index.ts"
 assert_rejects "/src/ dir leak"       "usr/src/app/foo.js"
 assert_rejects "tsconfig.json"        "app/tsconfig.json"
 assert_rejects "tsconfig.build.json"  "app/tsconfig.build.json"
@@ -50,6 +52,15 @@ assert_accepts "built HTML"           "app/dist/public/index.html"
 assert_accepts "dep type stub .d.ts"  "app/node_modules/foo/index.d.ts"
 assert_accepts "package.json"         "app/package.json"
 assert_accepts ".env.example"         "app/.env.example"
+
+# Third-party deps are not our IP and ship their own sourcemaps/source/config;
+# the runtime stage copies prod node_modules wholesale (esbuild bundles the
+# server with --packages=external). The guard protects OUR source only, so it
+# must ignore everything under node_modules.
+assert_accepts "dep sourcemap"        "app/node_modules/foo/dist/index.js.map"
+assert_accepts "dep raw .ts"          "app/node_modules/foo/src/index.ts"
+assert_accepts "dep tsconfig"         "app/node_modules/foo/tsconfig.json"
+assert_accepts "nested dep .map"      "app/node_modules/a/node_modules/b/x.js.map"
 
 if [ "$fails" -eq 0 ]; then
   echo "PASS (all)"
