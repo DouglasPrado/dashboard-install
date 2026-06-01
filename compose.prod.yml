@@ -46,6 +46,11 @@ services:
       # above limits damage from a compromised *dependency/agent*, not from this
       # intended, authenticated access.
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      # License host-binding (anti-cloning): the app hashes the host machine-id
+      # to pin a `boundTo` license to this host, so a copied install lands on a
+      # different host and fails. Read-only; harmless when the license is
+      # unbound (the fingerprint is simply ignored).
+      - /etc/machine-id:/etc/machine-id:ro
     # On Linux, host.docker.internal isn't resolvable by default; map it to the
     # host gateway so the container can SSH back to the host executor.
     extra_hosts:

@@ -45,6 +45,11 @@ assert_grep "healthcheck hits health" '/api/health'
 assert_grep "./data write mount kept" '^\s*-\s*\./data:/data(\s|$)'
 assert_grep "host-gateway kept"       'host\.docker\.internal:host-gateway'
 
+# License host-binding (anti-cloning) reads the host machine-id read-only to
+# pin a license to this host. Keep the mount so a `boundTo` license validates.
+assert_grep "machine-id mount (license host-binding)" \
+  '^\s*-\s*/etc/machine-id:/etc/machine-id:ro\s*$'
+
 if [ "$fails" -eq 0 ]; then
   echo "PASS (all)"
   exit 0
