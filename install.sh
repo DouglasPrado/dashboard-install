@@ -35,6 +35,8 @@
 #                        require them present.
 #   --no-caveman         Skip installing caveman token-compression skill for the
 #                        executor (default: installed, reduces token usage ~75%).
+#   --no-rtk             Skip installing RTK bash command compression for the
+#                        executor (default: installed, reduces bash tokens ~60-90%).
 #   --runtimes <list>    Comma-separated agent runtime CLIs to install for the
 #                        executor. Default: claude-code,opencode,codex. Known:
 #                        claude-code, opencode, codex, cursor (cursor is wip).
@@ -60,6 +62,7 @@ CURSOR_INSTALL_URL="https://cursor.com/install"
 # there, so it's omitted by default but can be requested via --runtimes.
 RUNTIMES_DEFAULT="claude-code,opencode,codex"
 CAVEMAN_INSTALL_URL="https://raw.githubusercontent.com/JuliusBrussee/caveman/main/install.sh"
+RTK_INSTALL_URL="https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh"
 
 HOST=""
 LICENSE=""
@@ -71,6 +74,7 @@ DIR="$PWD"
 CHECK_ONLY="false"
 RUNTIMES="$RUNTIMES_DEFAULT"
 CAVEMAN="true"
+RTK="true"
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mwarn:\033[0m %s\n' "$*" >&2; }
@@ -336,6 +340,40 @@ install_caveman() {
   log "caveman ready: agents will use compressed token mode by default"
 }
 
+# Install RTK (Rust Token Killer) for the executor user. RTK reduces token
+# usage by 60-90% on bash commands by filtering and compressing output.
+# Intercepts commands (e.g., `git status` → `rtk git status`) via hook.
+# Idempotent.
+install_rtk() {
+  [ "$RTK" = "true" ] || return 0
+  [ "$BOOTSTRAP" = "true" ] || return 0
+
+  # Skip if already installed (rtk binary exists)
+  local home; home="$(getent passwd "$EXECUTOR_USER" | cut -d: -f6)"
+  if [ -x "$home/.local/bin/rtk" ]; then
+    log "rtk already installed for $EXECUTOR_USER"
+    return 0
+  fi
+
+  log "installing RTK for $EXECUTOR_USER (bash command token compression)"
+  # RTK installer is a shell script that installs to ~/.local/bin.
+  # Run as the executor user. Then initialize the hook for Claude Code.
+  if ! runuser -u "$EXECUTOR_USER" -- bash -lc "
+    curl -fsSL $RTK_INSTALL_URL | sh
+    [ -x ~/.local/bin/rtk ] || { echo 'rtk binary not found'; exit 1; }
+    ~/.local/bin/rtk init -g --auto-patch
+  "; then
+    warn "RTK install failed — agents will work without bash compression"
+    return 0
+  fi
+
+  # Symlink rtk to /usr/local/bin so the non-interactive ssh session sees it
+  if [ -x "$home/.local/bin/rtk" ]; then
+    ln -sf "$home/.local/bin/rtk" "/usr/local/bin/rtk"
+    log "rtk ready: bash commands compressed via rtk hook"
+  fi
+}
+
 # Provision the host-side agent executor: a dedicated `claude-bots` user the
 # dashboard SSHes into (host.docker.internal) to run the agent runtime CLIs.
 # Without this a fresh host can't run agents ("Claude Code não instalado").
@@ -462,6 +500,9 @@ ensure_executor() {
   # 4b. caveman token-compression skill for all installed runtimes.
   install_caveman
 
+  # 4c. RTK bash command compression for all installed runtimes.
+  install_rtk
+
   # 5. guided login. Agent auth is OAuth/API-key (interactive) — it can't be
   # fully automated — so report per-runtime auth status and the exact login
   # command, and when run from a TTY offer to drop into each missing login now
@@ -501,6 +542,7 @@ while [ $# -gt 0 ]; do
     --trust-proxy)  TRUST_PROXY="true"; shift ;;
     --no-bootstrap) BOOTSTRAP="false"; shift ;;
     --no-caveman)   CAVEMAN="false"; shift ;;
+    --no-rtk)       RTK="false"; shift ;;
     --runtimes)     RUNTIMES="${2:-}"; shift 2 ;;
     --dir)          DIR="${2:-}"; shift 2 ;;
     --check)        CHECK_ONLY="true"; shift ;;
