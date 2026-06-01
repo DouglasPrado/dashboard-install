@@ -50,6 +50,22 @@ services:
     cap_drop:
       - ALL
     pids_limit: 512
+    # Liveness for unattended remote installs. Probes the ungated /api/health
+    # with node's global fetch (no curl/wget needed — survives read_only +
+    # cap_drop:ALL). NOTE: `restart: unless-stopped` does NOT act on health, so
+    # this gives observability (docker ps + the dashboard's own container panel,
+    # which reads the /(unhealthy)/ status) — not auto-restart. Auto-heal on
+    # unhealthy needs an external watcher (e.g. willfarrell/autoheal); deferred.
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     networks:
       - stack_web
     labels:

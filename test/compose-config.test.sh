@@ -43,6 +43,8 @@ assert_rendered() { # <label> <pattern>
 assert_rendered "read_only rendered" 'read_only:\s*true'
 assert_rendered "pids_limit rendered" 'pids_limit:'
 assert_rendered "cap_drop ALL rendered" '^\s*-\s*ALL\s*$'
+assert_rendered "healthcheck rendered" 'healthcheck:'
+assert_rendered "healthcheck test rendered" '/api/health'
 
 if [ "$fails" -eq 0 ]; then
   echo "PASS (all)"
