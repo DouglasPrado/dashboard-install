@@ -4,7 +4,7 @@
 # stack_web network is absent.
 services:
   traefik:
-    image: traefik:v3.5
+    image: traefik:v3.7.1
     container_name: stack-traefik
     restart: unless-stopped
     ports:

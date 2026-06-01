@@ -15,7 +15,7 @@ from the private source repo.
 curl -sSL https://raw.githubusercontent.com/DouglasPrado/dashboard-install/main/install.sh | bash
 ```
 
-Installs Docker (pinned 28.x), brings up Traefik + the `stack_web` network,
+Installs Docker (latest stable), brings up Traefik + the `stack_web` network,
 fetches the compose files, pulls the image, starts the dashboard. With no flags
 it defaults the host to `dash.<primary-ip>.nip.io`. **The license key is the
 login credential** — every route is gated behind a license-key session, so the

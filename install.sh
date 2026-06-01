@@ -43,7 +43,6 @@
 set -euo pipefail
 
 IMAGE_DEFAULT="ghcr.io/douglasprado/dashboard-install:latest"
-DOCKER_VERSION="29"   # Docker 29.x required — 28.x is EOL and removed from repos. Traefik v3.5 is compatible.
 NODE_MAJOR="22"   # match the node:22-alpine the preview/auto-setup containers build from (see dashboard auto-setup.ts)
 EXECUTOR_USER="claude-bots"   # host user the dashboard SSHes into to run agent CLIs
 WORKSPACE_DIR="/root/workspace"   # where the image clones projects (hardcoded host path in clone-project.ts)
@@ -112,15 +111,15 @@ require_root_for_bootstrap() {
   die "bootstrap requires root — re-run with sudo (sudo ./install.sh ...), or pass --no-bootstrap to skip Docker install, the shared stack, and executor user setup (in which case '$EXECUTOR_USER', its authorized_keys, and the runtime CLIs on PATH must already be provisioned)"
 }
 
-# Install Docker + Compose v2 if missing (pinned). No-op when already present.
+# Install Docker + Compose v2 if missing (latest stable). No-op when already present.
 ensure_docker() {
   if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
     return 0
   fi
   [ "$BOOTSTRAP" = "true" ] || die "docker/compose missing (run without --no-bootstrap to install them)"
   command -v curl >/dev/null 2>&1 || die "curl is required to install docker"
-  log "installing Docker $DOCKER_VERSION.x"
-  curl -fsSL https://get.docker.com | sh -s -- --version "$DOCKER_VERSION" || die "docker install failed"
+  log "installing Docker (latest stable; the stack's Traefik v3.7 speaks the modern engine API)"
+  curl -fsSL https://get.docker.com | sh || die "docker install failed"
   command -v systemctl >/dev/null 2>&1 && systemctl enable --now docker >/dev/null 2>&1 || true
   docker compose version >/dev/null 2>&1 || die "docker compose v2 not available after install"
 }
@@ -472,7 +471,7 @@ if [ "$CHECK_ONLY" = "true" ]; then
   # Report only; --check never installs or writes anything.
   docker_status="present"
   command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 \
-    || docker_status="$([ "$BOOTSTRAP" = true ] && echo "absent (would install $DOCKER_VERSION.x)" || echo "absent — FAILS without bootstrap")"
+    || docker_status="$([ "$BOOTSTRAP" = true ] && echo "absent (would install latest stable)" || echo "absent — FAILS without bootstrap")"
   net_status="$(docker network inspect stack_web >/dev/null 2>&1 && echo present || echo "$([ "$BOOTSTRAP" = true ] && echo "absent (would create)" || echo "absent — FAILS without bootstrap")")"
   # git is the hard one: clone/worktree/preview run it on the host. node is for
   # agent-driven local dev tooling. Without bootstrap, missing git == clone/preview break.
@@ -597,7 +596,33 @@ docker pull "$IMAGE"
 log "starting dashboard"
 ( cd "$DIR" && docker compose -f compose.prod.yml up -d )
 
-log "done. dashboard at http://$HOST  (health: /api/health)"
+# Post-up routing probe. A bare "up" can succeed while no request ever reaches
+# the container: Traefik may have registered no routers (engine/API mismatch),
+# or the host iptables for stack_web get desynced (common on WSL2 after a daemon
+# restart) so FORWARD drops container traffic and requests hang. Probe
+# end-to-end through Traefik, with a bounded timeout so a hang does not stall us
+# ~20s per attempt, and fail loud instead of printing a misleading "done".
+probe_ok=false
+log "probing http://$HOST/api/health through Traefik"
+for _i in $(seq 1 15); do
+  if curl -fsS --max-time 3 "http://$HOST/api/health" >/dev/null 2>&1; then
+    probe_ok=true
+    break
+  fi
+  sleep 2
+done
+
+if [ "$probe_ok" = true ]; then
+  log "done. dashboard reachable at http://$HOST  (health: /api/health)"
+else
+  warn "dashboard containers are up, but http://$HOST/api/health never answered."
+  warn "the stack started, yet traffic is not reaching it — almost always host networking:"
+  warn "  • stack_web iptables desynced (common on WSL2) — reprogram every network with:"
+  warn "      sudo systemctl restart docker"
+  warn "  • or recreate just this network:"
+  warn "      docker compose -p stack -f $DIR/stack.compose.yml down && docker network rm stack_web && docker compose -p stack -f $DIR/stack.compose.yml up -d"
+  warn "then re-check: curl -fsS http://$HOST/api/health"
+fi
 if [ -n "$LICENSE" ]; then
   log "open the dashboard and log in with your license key"
 else
