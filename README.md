@@ -2,7 +2,8 @@
 
 Public bootstrap for the self-hosted **dashboard**. Holds only the installer
 and the compose/stack files — **no source**. The dashboard itself ships as a
-published Docker image (`ghcr.io/douglasprado/dashboard`).
+published Docker image (`ghcr.io/douglasprado/dashboard-install`), built in CI
+from the private source repo.
 
 - `install.sh` — the installer
 - `compose.prod.yml` — the dashboard service
@@ -26,7 +27,7 @@ activation screen; pass `--license <key>` to install it ahead of time.
 ```bash
 curl -sSL https://raw.githubusercontent.com/DouglasPrado/dashboard-install/main/install.sh \
   | bash -s -- --host dash.192.168.3.139.nip.io --license <key> \
-      --image ghcr.io/douglasprado/dashboard:v0.1.0
+      --image ghcr.io/douglasprado/dashboard-install:v0.1.0
 ```
 
 `bash -s --` forwards the flags. `--no-bootstrap` requires Docker + the stack
