@@ -5,11 +5,11 @@
 # Pulls the published image (no source on this host), provisions per-host
 # secrets locally (nothing is embedded in the distribution), installs the
 # license, and brings the stack up via compose.prod.yml. With bootstrap on
-# (default) it also installs Docker and the shared Traefik stack if missing,
-# and provisions the host-side agent executor (the claude-bots user + its
-# authorized_keys + the claude CLI), so a fresh VM goes from zero to running
-# agents in one command. A one-time `claude /login` (via the UI) is still
-# needed before agents can run.
+# (default) it also installs Docker, the shared Traefik stack, and the host
+# tooling clone/worktree/preview need (git, Node.js) if missing, and provisions
+# the host-side agent executor (the claude-bots user + its authorized_keys + the
+# claude CLI), so a fresh VM goes from zero to running agents in one command. A
+# one-time `claude /login` (via the UI) is still needed before agents can run.
 #
 # Platforms: bootstrap (the default) provisions a Linux host executor and runs
 # on Linux only. macOS/other Unix: pre-provision the executor and use
