@@ -596,7 +596,33 @@ docker pull "$IMAGE"
 log "starting dashboard"
 ( cd "$DIR" && docker compose -f compose.prod.yml up -d )
 
-log "done. dashboard at http://$HOST  (health: /api/health)"
+# Post-up routing probe. A bare "up" can succeed while no request ever reaches
+# the container: Traefik may have registered no routers (engine/API mismatch),
+# or the host iptables for stack_web get desynced (common on WSL2 after a daemon
+# restart) so FORWARD drops container traffic and requests hang. Probe
+# end-to-end through Traefik, with a bounded timeout so a hang does not stall us
+# ~20s per attempt, and fail loud instead of printing a misleading "done".
+probe_ok=false
+log "probing http://$HOST/api/health through Traefik"
+for _i in $(seq 1 15); do
+  if curl -fsS --max-time 3 "http://$HOST/api/health" >/dev/null 2>&1; then
+    probe_ok=true
+    break
+  fi
+  sleep 2
+done
+
+if [ "$probe_ok" = true ]; then
+  log "done. dashboard reachable at http://$HOST  (health: /api/health)"
+else
+  warn "dashboard containers are up, but http://$HOST/api/health never answered."
+  warn "the stack started, yet traffic is not reaching it — almost always host networking:"
+  warn "  • stack_web iptables desynced (common on WSL2) — reprogram every network with:"
+  warn "      sudo systemctl restart docker"
+  warn "  • or recreate just this network:"
+  warn "      docker compose -p stack -f $DIR/stack.compose.yml down && docker network rm stack_web && docker compose -p stack -f $DIR/stack.compose.yml up -d"
+  warn "then re-check: curl -fsS http://$HOST/api/health"
+fi
 if [ -n "$LICENSE" ]; then
   log "open the dashboard and log in with your license key"
 else
