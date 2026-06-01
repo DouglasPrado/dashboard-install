@@ -33,6 +33,8 @@
 #                        admin-role identity; not required to boot or to log in.
 #   --no-bootstrap       Don't install Docker, the stack, or the executor user;
 #                        require them present.
+#   --no-caveman         Skip installing caveman token-compression skill for the
+#                        executor (default: installed, reduces token usage ~75%).
 #   --runtimes <list>    Comma-separated agent runtime CLIs to install for the
 #                        executor. Default: claude-code,opencode,codex. Known:
 #                        claude-code, opencode, codex, cursor (cursor is wip).
@@ -57,6 +59,7 @@ CURSOR_INSTALL_URL="https://cursor.com/install"
 # Default: the runtimes marked status=available in the registry. cursor is wip
 # there, so it's omitted by default but can be requested via --runtimes.
 RUNTIMES_DEFAULT="claude-code,opencode,codex"
+CAVEMAN_INSTALL_URL="https://raw.githubusercontent.com/JuliusBrussee/caveman/main/install.sh"
 
 HOST=""
 LICENSE=""
@@ -67,6 +70,7 @@ BOOTSTRAP="true"
 DIR="$PWD"
 CHECK_ONLY="false"
 RUNTIMES="$RUNTIMES_DEFAULT"
+CAVEMAN="true"
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mwarn:\033[0m %s\n' "$*" >&2; }
@@ -296,6 +300,37 @@ install_runtime() { # <runtime-id>
   fi
 }
 
+# Install caveman for the executor user. Caveman is a skill that compresses
+# token usage by ~75% while keeping full technical accuracy. It runs as a
+# SessionStart hook and persists in .claude/settings.json. Idempotent.
+install_caveman() {
+  [ "$CAVEMAN" = "true" ] || return 0
+  [ "$BOOTSTRAP" = "true" ] || return 0
+
+  # Skip if already installed (settings.json has caveman hooks or enabledPlugins)
+  local home; home="$(getent passwd "$EXECUTOR_USER" | cut -d: -f6)"
+  local settings="$home/.claude/settings.json"
+  if [ -f "$settings" ]; then
+    if grep -q '"caveman' "$settings" 2>/dev/null; then
+      log "caveman already installed for $EXECUTOR_USER"
+      return 0
+    fi
+  fi
+
+  log "installing caveman for $EXECUTOR_USER (token compression skill)"
+  # Caveman installer is a Node script that detects installed runtimes and
+  # configures hooks/settings.json. Run as the executor user.
+  if ! runuser -u "$EXECUTOR_USER" -- bash -lc "
+    command -v node >/dev/null 2>&1 || { echo 'node required for caveman'; exit 1; }
+    curl -fsSL $CAVEMAN_INSTALL_URL | bash -s -- --non-interactive --with-hooks
+  "; then
+    warn "caveman install failed — agents will work without token compression"
+    return 0
+  fi
+
+  log "caveman ready: agents will use compressed token mode by default"
+}
+
 # Provision the host-side agent executor: a dedicated `claude-bots` user the
 # dashboard SSHes into (host.docker.internal) to run the agent runtime CLIs.
 # Without this a fresh host can't run agents ("Claude Code não instalado").
@@ -410,6 +445,9 @@ ensure_executor() {
     log "executor ready: $EXECUTOR_USER + claude ($(/usr/local/bin/claude --version 2>/dev/null || echo 'version unknown'))"
   fi
 
+  # 4b. caveman token-compression skill for all installed runtimes.
+  install_caveman
+
   # 5. guided login. Agent auth is OAuth/API-key (interactive) — it can't be
   # fully automated — so report per-runtime auth status and the exact login
   # command, and when run from a TTY offer to drop into each missing login now
@@ -448,6 +486,7 @@ while [ $# -gt 0 ]; do
     --password)     PASSWORD="${2:-}"; shift 2 ;;
     --trust-proxy)  TRUST_PROXY="true"; shift ;;
     --no-bootstrap) BOOTSTRAP="false"; shift ;;
+    --no-caveman)   CAVEMAN="false"; shift ;;
     --runtimes)     RUNTIMES="${2:-}"; shift 2 ;;
     --dir)          DIR="${2:-}"; shift 2 ;;
     --check)        CHECK_ONLY="true"; shift ;;
