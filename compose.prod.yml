@@ -31,7 +31,20 @@ services:
       # history and settings from /claude/* (mapped to ~claude-bots/.claude).
       # Without this bind, the chat panel renders empty even after `claude /login`.
       - /home/claude-bots/.claude:/claude
-      # TODO Fase 2: trocar por socket-proxy (tecnativa/docker-socket-proxy) ro.
+      # Docker socket — load-bearing: the dashboard reads it to list/manage
+      # containers (docker.ts, docker-logs.ts), exec (docker-exec.ts) and run
+      # the security scanners in throwaway containers (security/docker-runner.ts).
+      #
+      # SECURITY (be honest, not theater): the `:ro` flag makes only the socket
+      # INODE read-only — it does NOT restrict the Docker API. Anyone who can
+      # talk to this socket can `POST /containers/create` with a host-root bind
+      # and Privileged:true, i.e. take over the daemon = root on the host. A
+      # socket-proxy would not help: the app legitimately needs create+exec, so
+      # the proxy would have to allow exactly the dangerous verbs. Treat this
+      # container as a privileged host orchestrator. Blast radius is the
+      # operator's OWN host (they already are root there); the runtime hardening
+      # above limits damage from a compromised *dependency/agent*, not from this
+      # intended, authenticated access.
       - /var/run/docker.sock:/var/run/docker.sock:ro
     # On Linux, host.docker.internal isn't resolvable by default; map it to the
     # host gateway so the container can SSH back to the host executor.
@@ -50,6 +63,22 @@ services:
     cap_drop:
       - ALL
     pids_limit: 512
+    # Liveness for unattended remote installs. Probes the ungated /api/health
+    # with node's global fetch (no curl/wget needed — survives read_only +
+    # cap_drop:ALL). NOTE: `restart: unless-stopped` does NOT act on health, so
+    # this gives observability (docker ps + the dashboard's own container panel,
+    # which reads the /(unhealthy)/ status) — not auto-restart. Auto-heal on
+    # unhealthy needs an external watcher (e.g. willfarrell/autoheal); deferred.
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     networks:
       - stack_web
     labels:

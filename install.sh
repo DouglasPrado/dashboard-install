@@ -25,7 +25,7 @@
 #                        license is the login credential — every route is gated
 #                        behind a license-key session. Omit to paste the key on
 #                        the first-run login screen instead.
-#   --image <ref>        Image to pull (default: ghcr.io/douglasprado/dashboard:latest).
+#   --image <ref>        Image to pull (default: ghcr.io/douglasprado/dashboard-install:latest).
 #                        Prefer a digest pin: ...@sha256:<digest>.
 #   --password <pw>      Optional. Adds a basic-auth identity for admin-role authz
 #                        (DASHBOARD_ADMINS); not required to boot or to log in.

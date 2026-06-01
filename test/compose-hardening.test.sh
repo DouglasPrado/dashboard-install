@@ -32,6 +32,13 @@ assert_grep "cap_drop ALL"            '^\s*-\s*ALL\s*$'
 assert_grep "pids_limit set"          '^\s*pids_limit:\s*[0-9]+\s*$'
 assert_grep "no-new-privileges kept"  'no-new-privileges:true'
 
+# Healthcheck: unattended remote installs need the container's liveness to be
+# observable (the dashboard's own container panel reads it via docker.ts's
+# /(unhealthy)/ probe). Hits the ungated /api/health route with node's global
+# fetch, so it needs no extra binary under read_only + cap_drop:ALL.
+assert_grep "healthcheck defined"     '^\s*healthcheck:\s*$'
+assert_grep "healthcheck hits health" '/api/health'
+
 # Hardening must not drop the load-bearing bind/host-gateway (see
 # compose-mounts.test.sh for the full mount contract). read_only rootfs is only
 # safe because the app writes solely under /data (a bind) and /tmp (tmpfs).
