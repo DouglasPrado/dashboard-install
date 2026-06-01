@@ -365,6 +365,15 @@ ensure_executor() {
     chown "$EXECUTOR_USER:$EXECUTOR_USER" "$creds"; chmod 600 "$creds"
   fi
 
+  # 1c. reconcile ~/.claude ownership. Earlier root-run containers (before the
+  #     compose ran as the executor uid) left root-owned files here — transcripts
+  #     under projects/, settings.json.bak, cloud-usage.json — which then block
+  #     the executor (and the now-non-root container) with EACCES: agent runs
+  #     fail and the Consumo tab reads no transcripts. Idempotent; safe to repeat.
+  if [ -d "$home/.claude" ]; then
+    chown -R "$EXECUTOR_USER:$EXECUTOR_USER" "$home/.claude" 2>/dev/null || true
+  fi
+
   # 2. authorize the dashboard's generated key (append-once, idempotent)
   install -d -m 700 -o "$EXECUTOR_USER" -g "$EXECUTOR_USER" "$home/.ssh"
   local ak="$home/.ssh/authorized_keys" pub
@@ -622,6 +631,11 @@ fi
 # ── host-side agent executor (claude-bots user + authorized_keys + claude CLI) ──
 ensure_executor
 
+# The container runs as the executor uid (compose `user:`), so the data dir it
+# writes to (SQLite, license.key, session.key, ssh key) must be owned by that
+# user — otherwise the non-root process can't open its own database.
+chown -R "$EXECUTOR_USER:$EXECUTOR_USER" "$DIR/data"
+
 # ── license ──
 if [ -n "$LICENSE" ]; then
   printf '%s\n' "$LICENSE" > "$DIR/data/license.key"
@@ -639,6 +653,16 @@ ENV_FILE="$DIR/.env"
   if [ "$TRUST_PROXY" = "true" ]; then
     echo "TRUST_PROXY_AUTH=true"
   fi
+  # Run the container as the executor uid (compose `user:` reads these). Keeps
+  # files the dashboard writes into the shared /claude and /data binds owned by
+  # claude-bots, so the executor that runs the agent CLI over SSH can read/write
+  # them — cap_drop:ALL removes CAP_CHOWN, so the container can't fix ownership
+  # at runtime. DOCKER_GID lets the non-root uid reach /var/run/docker.sock
+  # (root:docker on the host); omitted when the host has no docker group.
+  echo "EXECUTOR_UID=$(id -u "$EXECUTOR_USER")"
+  echo "EXECUTOR_GID=$(id -g "$EXECUTOR_USER")"
+  _docker_gid="$(getent group docker | cut -d: -f3)"
+  [ -n "$_docker_gid" ] && echo "DOCKER_GID=$_docker_gid"
 } > "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 log "wrote $ENV_FILE (mode 600)"

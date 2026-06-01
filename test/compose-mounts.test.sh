@@ -46,6 +46,20 @@ assert_grep "host.docker.internal mapped to host-gateway" \
 assert_grep "LICENSE_FILE pinned to /data/license.key" \
   '^\s*-\s*LICENSE_FILE=/data/license\.key\s*$'
 
+# Run as the host executor uid (claude-bots), not root. Files the dashboard
+# writes into the shared binds (/claude, /data) then stay owned by the same uid
+# that runs the agent CLI over SSH. Root-owned writes otherwise block the
+# executor with EACCES (empty Consumo tab, failed agent runs) — and cap_drop:ALL
+# below removes CAP_CHOWN, so the in-process chown-back fallback can't repair it.
+# install.sh fills EXECUTOR_UID/GID; the :-0 default preserves the legacy root run.
+assert_grep "container runs as the executor uid" \
+  '^\s*user:\s*"\$\{EXECUTOR_UID:-0\}:\$\{EXECUTOR_GID:-0\}"\s*$'
+
+# docker.sock is root:docker on the host; a non-root uid needs the host's numeric
+# docker gid to reach the daemon. Defaults to root's group (0) when unset.
+assert_grep "executor joins the host docker group" \
+  '^\s*-\s*"\$\{DOCKER_GID:-0\}"\s*$'
+
 if [ "$fails" -eq 0 ]; then
   echo "PASS (all)"
   exit 0

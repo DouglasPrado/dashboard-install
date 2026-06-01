@@ -6,6 +6,18 @@ services:
     image: ${DASHBOARD_IMAGE:-ghcr.io/douglasprado/dashboard-install:latest}
     container_name: dashboard-app
     restart: unless-stopped
+    # Run as the host executor (claude-bots) instead of root so every file the
+    # dashboard writes into the shared binds (/claude, /data) is owned by the
+    # same uid that runs the agent CLI over SSH. Root-owned writes otherwise
+    # block the executor with EACCES — empty Consumo tab and failed agent runs —
+    # and cap_drop:ALL (below) removes CAP_CHOWN, so the in-process chown-back
+    # fallback can't repair ownership. install.sh captures these from the host;
+    # the :-0 defaults preserve the legacy root run when the vars are unset.
+    user: "${EXECUTOR_UID:-0}:${EXECUTOR_GID:-0}"
+    group_add:
+      # docker.sock is root:docker on the host; a non-root uid needs the host's
+      # numeric docker gid to talk to the daemon. Defaults to root's group (0).
+      - "${DOCKER_GID:-0}"
     env_file:
       - .env
     environment:
