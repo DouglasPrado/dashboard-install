@@ -43,7 +43,7 @@
 set -euo pipefail
 
 IMAGE_DEFAULT="ghcr.io/douglasprado/dashboard-install:latest"
-DOCKER_VERSION="28.5"   # pin: engine 29 raised the min API version; the stack's Traefik client is pinned to 1.24
+DOCKER_VERSION="29"   # Docker 29.x required — 28.x is EOL and removed from repos. Traefik v3.5 is compatible.
 NODE_MAJOR="22"   # match the node:22-alpine the preview/auto-setup containers build from (see dashboard auto-setup.ts)
 EXECUTOR_USER="claude-bots"   # host user the dashboard SSHes into to run agent CLIs
 WORKSPACE_DIR="/root/workspace"   # where the image clones projects (hardcoded host path in clone-project.ts)
@@ -119,7 +119,7 @@ ensure_docker() {
   fi
   [ "$BOOTSTRAP" = "true" ] || die "docker/compose missing (run without --no-bootstrap to install them)"
   command -v curl >/dev/null 2>&1 || die "curl is required to install docker"
-  log "installing Docker $DOCKER_VERSION.x (engine 29 breaks the pinned Traefik client)"
+  log "installing Docker $DOCKER_VERSION.x"
   curl -fsSL https://get.docker.com | sh -s -- --version "$DOCKER_VERSION" || die "docker install failed"
   command -v systemctl >/dev/null 2>&1 && systemctl enable --now docker >/dev/null 2>&1 || true
   docker compose version >/dev/null 2>&1 || die "docker compose v2 not available after install"
