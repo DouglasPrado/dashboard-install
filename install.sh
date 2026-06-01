@@ -319,10 +319,15 @@ install_caveman() {
 
   log "installing caveman for $EXECUTOR_USER (token compression skill)"
   # Caveman installer is a Node script that detects installed runtimes and
-  # configures hooks/settings.json. Run as the executor user.
+  # configures hooks/settings.json. Run as the executor user with explicit
+  # --config-dir and NPM_CONFIG_PREFIX to avoid writing to /root/.agents.
   if ! runuser -u "$EXECUTOR_USER" -- bash -lc "
     command -v node >/dev/null 2>&1 || { echo 'node required for caveman'; exit 1; }
-    curl -fsSL $CAVEMAN_INSTALL_URL | bash -s -- --non-interactive --with-hooks
+    export NPM_CONFIG_PREFIX='$home/.npm-global'
+    export npm_config_prefix='$home/.npm-global'
+    mkdir -p '$home/.npm-global/bin'
+    export PATH=\"\$PATH:'$home/.npm-global/bin'\"
+    curl -fsSL $CAVEMAN_INSTALL_URL | bash -s -- --non-interactive --with-hooks --config-dir '$home/.claude'
   "; then
     warn "caveman install failed — agents will work without token compression"
     return 0
