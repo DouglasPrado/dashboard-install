@@ -316,6 +316,20 @@ ensure_executor() {
   local home; home="$(getent passwd "$EXECUTOR_USER" | cut -d: -f6)"
   [ -n "$home" ] && [ -d "$home" ] || die "could not resolve home dir for $EXECUTOR_USER"
 
+  # 1b. credential-dir sanity. The executor MUST own its own $home/.claude so its
+  #     OAuth token stays readable. A common manual hack symlinks it to (or shares
+  #     it with) root's dir to "share one login" — but then root running `claude`
+  #     rewrites .credentials.json as root:root and the executor loses read access
+  #     ("Not logged in"). Refuse the symlink; auto-correct stray root ownership.
+  if [ -L "$home/.claude" ]; then
+    die "$home/.claude is a symlink ($(readlink "$home/.claude")) — remove it; the executor needs its own dir, else root overwrites its credentials and the agent shows 'Not logged in'"
+  fi
+  local creds="$home/.claude/.credentials.json"
+  if [ -e "$creds" ] && [ "$(stat -c %U "$creds" 2>/dev/null)" != "$EXECUTOR_USER" ]; then
+    warn "$creds not owned by $EXECUTOR_USER — fixing"
+    chown "$EXECUTOR_USER:$EXECUTOR_USER" "$creds"; chmod 600 "$creds"
+  fi
+
   # 2. authorize the dashboard's generated key (append-once, idempotent)
   install -d -m 700 -o "$EXECUTOR_USER" -g "$EXECUTOR_USER" "$home/.ssh"
   local ak="$home/.ssh/authorized_keys" pub

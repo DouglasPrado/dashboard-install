@@ -1,0 +1,6 @@
+# License keys and local data
+data/
+
+# Runtime state
+*.log
+*.pid
