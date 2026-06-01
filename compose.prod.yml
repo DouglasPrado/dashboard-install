@@ -31,7 +31,20 @@ services:
       # history and settings from /claude/* (mapped to ~claude-bots/.claude).
       # Without this bind, the chat panel renders empty even after `claude /login`.
       - /home/claude-bots/.claude:/claude
-      # TODO Fase 2: trocar por socket-proxy (tecnativa/docker-socket-proxy) ro.
+      # Docker socket — load-bearing: the dashboard reads it to list/manage
+      # containers (docker.ts, docker-logs.ts), exec (docker-exec.ts) and run
+      # the security scanners in throwaway containers (security/docker-runner.ts).
+      #
+      # SECURITY (be honest, not theater): the `:ro` flag makes only the socket
+      # INODE read-only — it does NOT restrict the Docker API. Anyone who can
+      # talk to this socket can `POST /containers/create` with a host-root bind
+      # and Privileged:true, i.e. take over the daemon = root on the host. A
+      # socket-proxy would not help: the app legitimately needs create+exec, so
+      # the proxy would have to allow exactly the dangerous verbs. Treat this
+      # container as a privileged host orchestrator. Blast radius is the
+      # operator's OWN host (they already are root there); the runtime hardening
+      # above limits damage from a compromised *dependency/agent*, not from this
+      # intended, authenticated access.
       - /var/run/docker.sock:/var/run/docker.sock:ro
     # On Linux, host.docker.internal isn't resolvable by default; map it to the
     # host gateway so the container can SSH back to the host executor.
