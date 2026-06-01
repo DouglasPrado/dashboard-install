@@ -43,7 +43,6 @@
 set -euo pipefail
 
 IMAGE_DEFAULT="ghcr.io/douglasprado/dashboard-install:latest"
-DOCKER_VERSION="29"   # Docker 29.x required — 28.x is EOL and removed from repos. Traefik v3.5 is compatible.
 NODE_MAJOR="22"   # match the node:22-alpine the preview/auto-setup containers build from (see dashboard auto-setup.ts)
 EXECUTOR_USER="claude-bots"   # host user the dashboard SSHes into to run agent CLIs
 WORKSPACE_DIR="/root/workspace"   # where the image clones projects (hardcoded host path in clone-project.ts)
@@ -112,15 +111,15 @@ require_root_for_bootstrap() {
   die "bootstrap requires root — re-run with sudo (sudo ./install.sh ...), or pass --no-bootstrap to skip Docker install, the shared stack, and executor user setup (in which case '$EXECUTOR_USER', its authorized_keys, and the runtime CLIs on PATH must already be provisioned)"
 }
 
-# Install Docker + Compose v2 if missing (pinned). No-op when already present.
+# Install Docker + Compose v2 if missing (latest stable). No-op when already present.
 ensure_docker() {
   if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
     return 0
   fi
   [ "$BOOTSTRAP" = "true" ] || die "docker/compose missing (run without --no-bootstrap to install them)"
   command -v curl >/dev/null 2>&1 || die "curl is required to install docker"
-  log "installing Docker $DOCKER_VERSION.x"
-  curl -fsSL https://get.docker.com | sh -s -- --version "$DOCKER_VERSION" || die "docker install failed"
+  log "installing Docker (latest stable; the stack's Traefik v3.7 speaks the modern engine API)"
+  curl -fsSL https://get.docker.com | sh || die "docker install failed"
   command -v systemctl >/dev/null 2>&1 && systemctl enable --now docker >/dev/null 2>&1 || true
   docker compose version >/dev/null 2>&1 || die "docker compose v2 not available after install"
 }
@@ -472,7 +471,7 @@ if [ "$CHECK_ONLY" = "true" ]; then
   # Report only; --check never installs or writes anything.
   docker_status="present"
   command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 \
-    || docker_status="$([ "$BOOTSTRAP" = true ] && echo "absent (would install $DOCKER_VERSION.x)" || echo "absent — FAILS without bootstrap")"
+    || docker_status="$([ "$BOOTSTRAP" = true ] && echo "absent (would install latest stable)" || echo "absent — FAILS without bootstrap")"
   net_status="$(docker network inspect stack_web >/dev/null 2>&1 && echo present || echo "$([ "$BOOTSTRAP" = true ] && echo "absent (would create)" || echo "absent — FAILS without bootstrap")")"
   # git is the hard one: clone/worktree/preview run it on the host. node is for
   # agent-driven local dev tooling. Without bootstrap, missing git == clone/preview break.
