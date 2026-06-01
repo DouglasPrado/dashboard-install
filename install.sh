@@ -374,6 +374,52 @@ install_rtk() {
   fi
 }
 
+# Install the canonical Claude Code subagents for the executor user. Dropping
+# test-writer into ~/.claude/agents (user level) makes `subagent_type: test-writer`
+# resolvable from ANY project the dashboard's agents run in — not only repos that
+# happen to ship their own .claude/agents dir. Lets the assistant agent delegate
+# test work to a cheaper haiku subagent regardless of the run's cwd.
+# Idempotent: skips a subagent that already exists (preserves local edits).
+install_subagents() {
+  [ "$BOOTSTRAP" = "true" ] || return 0
+
+  local home; home="$(getent passwd "$EXECUTOR_USER" | cut -d: -f6)"
+  [ -n "$home" ] || { warn "could not resolve home for $EXECUTOR_USER — skipping subagents"; return 0; }
+  local f="$home/.claude/agents/test-writer.md"
+
+  if [ -f "$f" ]; then
+    log "subagent test-writer already present for $EXECUTOR_USER"
+    return 0
+  fi
+
+  mkdir -p "$home/.claude/agents"
+  cat > "$f" <<'EOF'
+---
+name: test-writer
+description: Writes and runs tests for the current repo. Use for creating tests, running an existing suite, and the Red/Green steps of TDD. Returns the test diff and run output.
+model: haiku
+tools: Read, Write, Edit, Grep, Glob, Bash
+---
+
+You are the **test-writer** subagent. You own the test work delegated to you by the main agent. Keep it focused: write and run tests, report back.
+
+## Tasks
+1. Detect the test framework (vitest, jest, etc.) and package manager from `package.json` + lockfile. Don't assume pnpm.
+2. Follow the existing test convention — read 2-3 existing tests for directory, naming and extension before writing.
+3. TDD Red: write the failing test that reproduces the gap. Run it. Confirm it fails for the *right* reason (a real assertion, not an import/typo error).
+4. When asked to run an existing suite, run it and report the result — pass or fail, plainly.
+5. Return: the test file diff + the last ~20 lines of test output.
+
+## Constraints
+- NEVER modify production source (`src/`, `lib/`, etc.) — only test files (`tests/`, `__tests__/`, `*.test.*`, `*.spec.*`).
+- Do NOT commit, push, or open PRs — the main agent owns git.
+- Do NOT run `git push --force`.
+- If you can't infer the project convention after reading existing tests, say so and stop instead of guessing.
+EOF
+  chown -R "$EXECUTOR_USER:$EXECUTOR_USER" "$home/.claude" 2>/dev/null || true
+  log "installed test-writer subagent for $EXECUTOR_USER (haiku)"
+}
+
 # Provision the host-side agent executor: a dedicated `claude-bots` user the
 # dashboard SSHes into (host.docker.internal) to run the agent runtime CLIs.
 # Without this a fresh host can't run agents ("Claude Code não instalado").
@@ -502,6 +548,9 @@ ensure_executor() {
 
   # 4c. RTK bash command compression for all installed runtimes.
   install_rtk
+
+  # 4d. Canonical Claude Code subagents (test-writer) at user level.
+  install_subagents
 
   # 5. guided login. Agent auth is OAuth/API-key (interactive) — it can't be
   # fully automated — so report per-runtime auth status and the exact login
