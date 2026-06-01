@@ -34,6 +34,16 @@ already present (just installs the dashboard). `--password` / `--trust-proxy`
 are optional and only add an operator identity for admin-role authz; they are
 not required to boot or to log in.
 
+### Access over Tailscale (other networks)
+
+`dash.<ip>.nip.io` resolves to the IP in the name, so a LAN IP (`192.168.x`) is
+only reachable on that LAN. Bring **Tailscale up before installing** and the
+installer auto-detects the host's tailnet IP (`100.x`) and adds
+`dash.<tailscale-ip>.nip.io` as a second Traefik Host — the dashboard is then
+reachable from any tailnet peer on any network, no extra config. The install
+output and `--check` print the tailnet URL. (Installed before `tailscale up`?
+Re-run the installer once the tailnet IP exists.)
+
 ## Don't pipe blind
 
 `curl | bash` runs code you didn't read. Before trusting it:
