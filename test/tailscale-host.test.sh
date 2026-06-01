@@ -16,7 +16,11 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_SH="$SCRIPT_DIR/../install.sh"
 
-eval "$(sed -n '/^detect_tailscale_ip()/,/^}/p; /^build_traefik_rule()/,/^}/p' "$INSTALL_SH")"
+# Permissive tailnet matcher the caller appends — set hermetically (constant,
+# not a function, so it isn't sed-extractable). Mirror install.sh's value.
+TAILNET_HOST_REGEXP='HostRegexp(`^dash\.[0-9.]+\.nip\.io$`)'
+
+eval "$(sed -n '/^detect_tailscale_ip()/,/^}/p; /^build_traefik_rule()/,/^}/p; /^dashboard_rule()/,/^}/p' "$INSTALL_SH")"
 
 # Override `command -v` so we control whether the tailscale CLI "exists".
 command() {
@@ -53,6 +57,13 @@ assert_eq "two hosts joined with ||" "$(build_traefik_rule 'dash.192.168.3.139.n
   'Host(`dash.192.168.3.139.nip.io`) || Host(`dash.100.108.156.85.nip.io`)'
 assert_eq "empty alt skipped" "$(build_traefik_rule 'dash.192.168.3.139.nip.io' '')" \
   'Host(`dash.192.168.3.139.nip.io`)'
+
+# ── dashboard_rule: explicit primary Host OR the permissive tailnet/LAN matcher,
+# so any dash.<ip>.nip.io (tailnet 100.x or LAN 192.168.x) routes with no IP in
+# .env — the personalized host lives in the dashboard's Tailscale settings. ──
+assert_eq "rule = primary Host || tailnet regexp" \
+  "$(dashboard_rule 'dash.example.com')" \
+  'Host(`dash.example.com`) || HostRegexp(`^dash\.[0-9.]+\.nip\.io$`)'
 
 if [ "$fails" -eq 0 ]; then
   echo "PASS (all)"
