@@ -59,3 +59,26 @@ can verify it before the stack comes up.
 
 See the dashboard's `docs/INSTALL.md` and `docs/RUNBOOK.md` for the full flow and
 host hardening.
+
+## Security & trust model
+
+Be honest about what the distribution does and does not protect — these are the
+threat-model facts to weigh before selling licenses:
+
+- **The container is a privileged host orchestrator.** It mounts the Docker
+  socket (to manage containers, read logs, run the security scanners) and holds
+  an SSH key into the host executor (`claude-bots`). Anyone who reaches the
+  socket or that key has root-equivalent control of the host. The runtime
+  hardening (`read_only`, `cap_drop: ALL`, `no-new-privileges`) limits damage
+  from a *compromised dependency or agent*, not from this intended access. The
+  `:ro` on the socket is cosmetic — it does not restrict the Docker API.
+- **The image ships minified, source-free JS.** A CI guard rejects any release
+  that leaks `.ts`/sourcemaps/`/src`. This raises the cost of extraction; it is
+  friction, not DRM. A root-on-host operator can still read the running bundle.
+- **The license is an offline, signed token (no phone-home).** It is verified
+  against an embedded public key; production ignores env overrides of the trust
+  anchor and always enforces. **Known limitation (v1):** the token is not bound
+  to a host, so one key can run on multiple installs — `expiresAt` is the only
+  limiter, and a leaked key cannot be revoked before it expires. Per-install
+  binding or a phone-home activation server is the lever to close this and is
+  deferred until the customer base justifies operating that service.
