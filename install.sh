@@ -44,6 +44,7 @@ set -euo pipefail
 
 IMAGE_DEFAULT="ghcr.io/douglasprado/dashboard-install:latest"
 DOCKER_VERSION="28.5"   # pin: engine 29 raised the min API version; the stack's Traefik client is pinned to 1.24
+NODE_MAJOR="22"   # match the node:22-alpine the preview/auto-setup containers build from (see dashboard auto-setup.ts)
 EXECUTOR_USER="claude-bots"   # host user the dashboard SSHes into to run agent CLIs
 WORKSPACE_DIR="/root/workspace"   # where the image clones projects (hardcoded host path in clone-project.ts)
 
@@ -122,6 +123,67 @@ ensure_docker() {
   curl -fsSL https://get.docker.com | sh -s -- --version "$DOCKER_VERSION" || die "docker install failed"
   command -v systemctl >/dev/null 2>&1 && systemctl enable --now docker >/dev/null 2>&1 || true
   docker compose version >/dev/null 2>&1 || die "docker compose v2 not available after install"
+}
+
+# Install the host-side tools the dashboard runs AS THE EXECUTOR over SSH.
+#
+#   git  — clone-project.ts runs `git clone` and git-worktree.ts runs
+#          `git worktree` ON THE HOST (host.docker.internal), not in the
+#          container. The live preview mounts the per-session worktree into
+#          /app, so without host git the clone fails (exit 128) and no preview
+#          ever comes up. This is the #1 reason live preview won't start on a
+#          fresh VM: dev hosts ship git system-wide, a minimal VM doesn't.
+#   node — lets the executor's agents run a project's dev tooling (pnpm install,
+#          a dev server) directly against a worktree on the host. The dashboard's
+#          own preview containers bundle node:$NODE_MAJOR-alpine, so the preview
+#          feature itself doesn't need host node — agent-driven local runs do.
+#
+# Gated by bootstrap like docker/stack. Best-effort per tool: a failed install
+# warns but doesn't abort (git failing is loud since clone needs it).
+ensure_host_tooling() {
+  local need_git="" need_node=""
+  command -v git  >/dev/null 2>&1 || need_git=1
+  command -v node >/dev/null 2>&1 || need_node=1
+  if [ -z "$need_git" ] && [ -z "$need_node" ]; then
+    log "host tooling present (git, node $(node -v 2>/dev/null))"
+    return 0
+  fi
+
+  if [ "$BOOTSTRAP" != "true" ]; then
+    die "missing host tooling:${need_git:+ git}${need_node:+ node} — clone/worktree/preview run them on the host as the executor (run without --no-bootstrap to install, or put them on the host PATH)"
+    return 1
+  fi
+  if ! command -v apt-get >/dev/null 2>&1; then
+    warn "apt-get unavailable — install${need_git:+ git}${need_node:+ node} on the host PATH manually (clone/preview need git)"
+    return 0
+  fi
+
+  apt-get update -qq >/dev/null 2>&1 || warn "apt-get update failed; tooling install may not find packages"
+
+  if [ -n "$need_git" ]; then
+    log "installing git (clone/worktree/preview run it on the host)"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git >/dev/null 2>&1 \
+      || warn "failed to install git — clone and live preview need it; install git on the host"
+  fi
+
+  if [ -n "$need_node" ]; then
+    log "installing Node.js $NODE_MAJOR.x (matches the node:$NODE_MAJOR containers the preview builds)"
+    # Prefer NodeSource for a current LTS matching the container; fall back to the
+    # distro packages (older, but enough for agents to run dev tooling) if the
+    # NodeSource setup doesn't support this release.
+    if ! { command -v curl >/dev/null 2>&1 \
+        && curl -fsSL "https://deb.nodesource.com/setup_$NODE_MAJOR.x" | bash - >/dev/null 2>&1 \
+        && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs >/dev/null 2>&1; }; then
+      warn "NodeSource setup failed; falling back to the distro nodejs/npm packages (older version)"
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs npm >/dev/null 2>&1 \
+        || warn "failed to install Node.js — install it on the host PATH so agents can run project dev tooling"
+    fi
+    # corepack ships with Node >=16 and provisions pnpm/yarn on demand; projects here use pnpm.
+    command -v corepack >/dev/null 2>&1 && corepack enable >/dev/null 2>&1 || true
+  fi
+
+  command -v git  >/dev/null 2>&1 && log "git ready ($(git --version 2>/dev/null))"
+  command -v node >/dev/null 2>&1 && log "node ready ($(node --version 2>/dev/null))"
 }
 
 # Create the stack_web network + minimal Traefik if the network is absent.
@@ -412,6 +474,10 @@ if [ "$CHECK_ONLY" = "true" ]; then
   command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 \
     || docker_status="$([ "$BOOTSTRAP" = true ] && echo "absent (would install $DOCKER_VERSION.x)" || echo "absent — FAILS without bootstrap")"
   net_status="$(docker network inspect stack_web >/dev/null 2>&1 && echo present || echo "$([ "$BOOTSTRAP" = true ] && echo "absent (would create)" || echo "absent — FAILS without bootstrap")")"
+  # git is the hard one: clone/worktree/preview run it on the host. node is for
+  # agent-driven local dev tooling. Without bootstrap, missing git == clone/preview break.
+  git_status="$(command -v git >/dev/null 2>&1 && echo "present ($(git --version 2>/dev/null | awk '{print $3}'))" || echo "$([ "$BOOTSTRAP" = true ] && echo "absent (would install)" || echo "absent — clone/preview FAIL")")"
+  node_status="$(command -v node >/dev/null 2>&1 && echo "present ($(node -v 2>/dev/null))" || echo "$([ "$BOOTSTRAP" = true ] && echo "absent (would install $NODE_MAJOR.x)" || echo "absent — agent local dev tooling won't run")")"
   if [ -f "$COMPOSE_FILE" ]; then
     compose_status="local"
   elif curl -fsIL "$COMPOSE_URL" >/dev/null 2>&1; then
@@ -454,6 +520,7 @@ if [ "$CHECK_ONLY" = "true" ]; then
   fi
   log "check: host=$HOST, image=$IMAGE, auth=license-session, identity=${identity:-none}, bootstrap=$BOOTSTRAP"
   log "       docker=$docker_status, stack_web=$net_status, compose=$compose_status"
+  log "       git=$git_status, node=$node_status"
   ws_status="$([ -d "$WORKSPACE_DIR" ] && echo "owner=$(stat -c '%U' "$WORKSPACE_DIR" 2>/dev/null || echo '?')" || echo "$([ "$BOOTSTRAP" = true ] && echo "absent (would create)" || echo "absent — clone fails")")"
   log "       executor($EXECUTOR_USER)=$exec_user_status, sshd=$sshd_status, workspace=$ws_status"
   log "       runtimes: $runtimes_status"
@@ -475,8 +542,9 @@ fi
 # ── root preflight: stop a bootstrap-as-non-root invocation BEFORE side effects ──
 require_root_for_bootstrap
 
-# ── bootstrap: Docker, then the shared stack ──
+# ── bootstrap: Docker, host tooling (git/node), then the shared stack ──
 ensure_docker
+ensure_host_tooling
 ensure_stack
 
 # One-liner support: when piped (curl ... | bash) compose.prod.yml is not on
