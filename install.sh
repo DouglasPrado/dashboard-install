@@ -21,9 +21,11 @@
 #
 # Options:
 #   --host <domain>      Host the dashboard is served at. Default: dash.<ip>.nip.io.
-#                        When Tailscale is up, dash.<tailscale-ip>.nip.io is also
-#                        added so the dashboard is reachable from any tailnet peer
-#                        on another network (run `tailscale up` before installing).
+#                        The router also matches dash.<ip>.nip.io for ANY IP, so
+#                        with Tailscale up it's reachable from any tailnet peer on
+#                        another network at dash.<tailnet-ip>.nip.io — no per-IP
+#                        config. A personalized host goes in the dashboard's
+#                        Tailscale settings, not an env var.
 #   --license <key>      License token, or a path to a file containing it. The
 #                        license is the login credential — every route is gated
 #                        behind a license-key session. Omit to paste the key on
@@ -98,6 +100,21 @@ build_traefik_rule() { # <primary-host> [extra-host...]
     [ -n "$h" ] && rule="$rule || Host(\`$h\`)"
   done
   printf '%s' "$rule"
+}
+
+# Permissive tailnet/LAN matcher (Traefik v3 HostRegexp = raw Go regexp). Routes
+# dash.<ipv4>.nip.io for ANY embedded IP — tailnet 100.x or LAN 192.168.x — so a
+# personalized Tailscale IP never has to be written into .env: it's a generic
+# pattern, and the canonical host lives in the dashboard's Tailscale settings.
+# Anchored + `dash.` prefix so it can't swallow project routes (`<proj>.<ip>.nip.io`).
+TAILNET_HOST_REGEXP='HostRegexp(`^dash\.[0-9.]+\.nip\.io$`)'
+
+# Compose the dashboard's router rule: the explicit primary Host (covers a custom
+# --host like dash.example.com) OR the permissive tailnet/LAN matcher (covers any
+# nip.io IP with no enumeration). Pure → .env carries the finished rule, so a new
+# host is remote-reachable over Tailscale with zero per-IP config.
+dashboard_rule() { # <primary-host>
+  printf '%s || %s' "$(build_traefik_rule "$1")" "$TAILNET_HOST_REGEXP"
 }
 
 # True when something is listening on TCP :22 (the executor SSH endpoint the
@@ -477,21 +494,23 @@ if [ -z "$HOST" ]; then
   log "no --host given; defaulting to $HOST"
 fi
 
-# ── tailnet host: also answer on dash.<tailscale-ip>.nip.io so the dashboard is
-# reachable from any tailnet peer on another network. A LAN-IP nip.io host
-# (192.168.x) isn't routable off-LAN; the tailnet IP (100.x) is. Auto-detected —
-# bring Tailscale up before installing and a fresh host is remote-reachable with
-# no extra config. The finished multi-host Traefik rule is carried in .env as
-# DASHBOARD_RULE so compose.prod.yml needn't do nested interpolation. ──
+# ── tailnet reachability: the dashboard host is dash.<ip>.nip.io, and nip.io
+# resolves to the embedded IP. A LAN IP (192.168.x) isn't routable off-LAN; a
+# tailnet IP (100.x) is, from any tailnet peer. Rather than bake a specific
+# tailscale IP into .env, the router rule carries a permissive HostRegexp
+# (dashboard_rule) that matches dash.<ip>.nip.io for ANY IP — so a fresh host is
+# remote-reachable over Tailscale with zero per-IP config, and a personalized
+# host can live in the dashboard's Tailscale settings instead of an env var. The
+# tailnet IP is still detected here only to print the exact URL. ──
 TS_IP="$(detect_tailscale_ip)"
 TS_HOST=""
 if [ -n "$TS_IP" ]; then
   TS_HOST="dash.${TS_IP}.nip.io"
-  log "tailscale detected ($TS_IP); also serving at http://$TS_HOST"
+  log "tailscale detected ($TS_IP); reachable from any tailnet peer at http://$TS_HOST"
 elif command -v tailscale >/dev/null 2>&1; then
-  warn "tailscale CLI present but no IPv4 yet — run 'tailscale up', then re-run to expose the dashboard on the tailnet"
+  warn "tailscale CLI present but no IPv4 yet — run 'tailscale up' so peers can reach the dashboard at dash.<tailnet-ip>.nip.io"
 fi
-DASHBOARD_RULE="$(build_traefik_rule "$HOST" "$TS_HOST")"
+DASHBOARD_RULE="$(dashboard_rule "$HOST")"
 
 # ── auth: the license-key session gates every API route, so the dashboard boots
 # safe with no password/proxy. --password / --trust-proxy are optional and only

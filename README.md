@@ -37,12 +37,15 @@ not required to boot or to log in.
 ### Access over Tailscale (other networks)
 
 `dash.<ip>.nip.io` resolves to the IP in the name, so a LAN IP (`192.168.x`) is
-only reachable on that LAN. Bring **Tailscale up before installing** and the
-installer auto-detects the host's tailnet IP (`100.x`) and adds
-`dash.<tailscale-ip>.nip.io` as a second Traefik Host — the dashboard is then
-reachable from any tailnet peer on any network, no extra config. The install
-output and `--check` print the tailnet URL. (Installed before `tailscale up`?
-Re-run the installer once the tailnet IP exists.)
+only reachable on that LAN. The Traefik router matches `dash.<ip>.nip.io` for
+**any** IP (a permissive `HostRegexp`), so once **Tailscale is up** the dashboard
+is reachable from any tailnet peer on any network at `dash.<tailnet-ip>.nip.io` —
+no per-IP config, and nothing to re-run if the tailnet IP changes. The install
+output and `--check` print the exact tailnet URL when Tailscale is detected.
+
+A **personalized** Tailscale host (e.g. a MagicDNS name) belongs in the
+dashboard's Tailscale settings, not an env var — the permissive router already
+accepts it.
 
 ## Don't pipe blind
 
