@@ -43,7 +43,10 @@ services:
       - stack_web
     labels:
       - traefik.enable=true
-      - traefik.http.routers.dashboard.rule=Host(`${DASHBOARD_HOST:?set DASHBOARD_HOST}`)
+      # DASHBOARD_RULE is the finished Traefik rule (LAN host + tailnet host when
+      # Tailscale was up at install). Falls back to a single Host() for .env files
+      # written before DASHBOARD_RULE existed.
+      - "traefik.http.routers.dashboard.rule=${DASHBOARD_RULE:-Host(`${DASHBOARD_HOST:?set DASHBOARD_HOST}`)}"
       - traefik.http.routers.dashboard.entrypoints=web
       # O server de produção serve SPA + API na mesma porta (3001); sem vite.
       - traefik.http.services.dashboard.loadbalancer.server.port=3001

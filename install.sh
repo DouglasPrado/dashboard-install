@@ -21,6 +21,9 @@
 #
 # Options:
 #   --host <domain>      Host the dashboard is served at. Default: dash.<ip>.nip.io.
+#                        When Tailscale is up, dash.<tailscale-ip>.nip.io is also
+#                        added so the dashboard is reachable from any tailnet peer
+#                        on another network (run `tailscale up` before installing).
 #   --license <key>      License token, or a path to a file containing it. The
 #                        license is the login credential — every route is gated
 #                        behind a license-key session. Omit to paste the key on
@@ -74,6 +77,28 @@ warn() { printf '\033[1;33mwarn:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 sha256() { command -v sha256sum >/dev/null 2>&1 && sha256sum "$1" | cut -d' ' -f1 || shasum -a 256 "$1" | cut -d' ' -f1; }
 detect_ip() { ip -4 -o route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1; }
+
+# The host's Tailscale IPv4 (100.64.0.0/10 CGNAT range), or empty when the CLI is
+# absent / the node isn't up. nip.io resolves `dash.<ip>.nip.io` to the embedded
+# IP, so advertising the tailnet IP as a Host makes the dashboard reachable from
+# any tailnet peer on another network — a LAN IP (192.168.x) never is. Prints the
+# first -4 address on stdout.
+detect_tailscale_ip() {
+  command -v tailscale >/dev/null 2>&1 || return 0
+  tailscale ip -4 2>/dev/null | head -1
+}
+
+# Build a Traefik router rule from one primary host plus any extra hosts, joined
+# with `||` so a single router answers on all of them. Empty extras are skipped.
+# Kept pure so .env can carry the finished rule (no nested compose interpolation).
+build_traefik_rule() { # <primary-host> [extra-host...]
+  local rule="Host(\`$1\`)" h
+  shift || true
+  for h in "$@"; do
+    [ -n "$h" ] && rule="$rule || Host(\`$h\`)"
+  done
+  printf '%s' "$rule"
+}
 
 # True when something is listening on TCP :22 (the executor SSH endpoint the
 # dashboard reaches over host.docker.internal). Used to verify sshd actually
@@ -452,6 +477,22 @@ if [ -z "$HOST" ]; then
   log "no --host given; defaulting to $HOST"
 fi
 
+# ── tailnet host: also answer on dash.<tailscale-ip>.nip.io so the dashboard is
+# reachable from any tailnet peer on another network. A LAN-IP nip.io host
+# (192.168.x) isn't routable off-LAN; the tailnet IP (100.x) is. Auto-detected —
+# bring Tailscale up before installing and a fresh host is remote-reachable with
+# no extra config. The finished multi-host Traefik rule is carried in .env as
+# DASHBOARD_RULE so compose.prod.yml needn't do nested interpolation. ──
+TS_IP="$(detect_tailscale_ip)"
+TS_HOST=""
+if [ -n "$TS_IP" ]; then
+  TS_HOST="dash.${TS_IP}.nip.io"
+  log "tailscale detected ($TS_IP); also serving at http://$TS_HOST"
+elif command -v tailscale >/dev/null 2>&1; then
+  warn "tailscale CLI present but no IPv4 yet — run 'tailscale up', then re-run to expose the dashboard on the tailnet"
+fi
+DASHBOARD_RULE="$(build_traefik_rule "$HOST" "$TS_HOST")"
+
 # ── auth: the license-key session gates every API route, so the dashboard boots
 # safe with no password/proxy. --password / --trust-proxy are optional and only
 # supply an operator identity for admin-role authz. Without a license nobody can
@@ -518,8 +559,16 @@ if [ "$CHECK_ONLY" = "true" ]; then
   else
     sshd_status="$([ "$BOOTSTRAP" = true ] && echo "absent (would install)" || echo "absent — clone/agents won't run")"
   fi
+  if [ -n "$TS_HOST" ]; then
+    tailnet_status="up ($TS_IP) → also serves http://$TS_HOST"
+  elif command -v tailscale >/dev/null 2>&1; then
+    tailnet_status="CLI present, no IPv4 — run 'tailscale up' for off-LAN access"
+  else
+    tailnet_status="absent — dashboard only reachable on the LAN host"
+  fi
   log "check: host=$HOST, image=$IMAGE, auth=license-session, identity=${identity:-none}, bootstrap=$BOOTSTRAP"
   log "       docker=$docker_status, stack_web=$net_status, compose=$compose_status"
+  log "       tailnet=$tailnet_status"
   log "       git=$git_status, node=$node_status"
   ws_status="$([ -d "$WORKSPACE_DIR" ] && echo "owner=$(stat -c '%U' "$WORKSPACE_DIR" 2>/dev/null || echo '?')" || echo "$([ "$BOOTSTRAP" = true ] && echo "absent (would create)" || echo "absent — clone fails")")"
   log "       executor($EXECUTOR_USER)=$exec_user_status, sshd=$sshd_status, workspace=$ws_status"
@@ -580,6 +629,7 @@ fi
 ENV_FILE="$DIR/.env"
 {
   echo "DASHBOARD_HOST=$HOST"
+  echo "DASHBOARD_RULE=$DASHBOARD_RULE"
   echo "DASHBOARD_IMAGE=$IMAGE"
   if [ -n "$PASSWORD" ]; then
     echo "DASHBOARD_PASSWORD=$PASSWORD"
@@ -598,6 +648,9 @@ log "starting dashboard"
 ( cd "$DIR" && docker compose -f compose.prod.yml up -d )
 
 log "done. dashboard at http://$HOST  (health: /api/health)"
+if [ -n "$TS_HOST" ]; then
+  log "      reachable from any tailnet peer at http://$TS_HOST"
+fi
 if [ -n "$LICENSE" ]; then
   log "open the dashboard and log in with your license key"
 else
