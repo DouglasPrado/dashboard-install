@@ -44,26 +44,33 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
             if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-              version="${GITHUB_REF_NAME}"
+              version="${GITHUB_REF_NAME}"   # vX.Y.Z (or vX.Y.Z-rc.N) git tag → a release
             else
-              # Push to main → latest
-              version="latest"
+              version="edge"                 # non-tag push (unreachable: trigger is tags only)
             fi
           elif [ "${{ github.event_name }}" = "repository_dispatch" ]; then
-            # Dispatched from dashboard → always latest
-            version="latest"
+            # Forwarded from the dashboard repo. A vX.Y.Z tag push carries that
+            # version in the payload (→ a real release); a plain main push omits
+            # it and falls back to the rolling `edge` preview.
+            version="${{ github.event.client_payload.version }}"
+            version="${version:-edge}"
           else
             version="${{ github.event.inputs.tag }}"
           fi
+          # Clean version (no leading v) for the image's OCI version label / build-arg,
+          # so it matches package.json and the app's reported VERSION.
+          clean="${version#v}"
           echo "tag=$version" >> "$GITHUB_OUTPUT"
-          # Publish the version tag and, for a stable release, also move :latest.
-          # Skip :latest for pre-releases (e.g. v1.2.0-rc.1) and when the version
-          # already is "latest" (avoids a duplicate ref).
+          echo "version=$clean" >> "$GITHUB_OUTPUT"
+          # Publish the version tag and, for a STABLE release only, also move :latest.
+          # Skip :latest for pre-releases (vX.Y.Z-rc.N), the rolling `edge` preview,
+          # and a literal `latest` input (avoids a duplicate ref). The update check
+          # only ever nudges operators toward :latest stable releases.
           {
             echo "tags<<EOF"
             echo "$IMAGE:$version"
             case "$version" in
-              latest|*-*) ;;
+              latest|edge|*-*) ;;
               *) echo "$IMAGE:latest" ;;
             esac
             echo "EOF"
@@ -89,6 +96,8 @@ jobs:
           push: false
           load: true
           tags: dashboard-install:guard
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
 
       # Fail the release if the image leaks source/sourcemap artifacts (the
       # MINIFY+STRIP invariant). Inspect the exported filesystem from the runner
@@ -120,6 +129,8 @@ jobs:
           context: dashboard
           push: true
           tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
           provenance: true
           sbom: true
 
