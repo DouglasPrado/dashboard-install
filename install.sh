@@ -31,11 +31,11 @@
 #                        (DASHBOARD_ADMINS); not required to boot or to log in.
 #   --trust-proxy        Optional. Trust a reverse-proxy identity header as the
 #                        admin-role identity; not required to boot or to log in.
-#   --tailscale          Install Tailscale, bring the node up, and expose the
-#                        dashboard over Tailscale Serve (HTTPS on your tailnet,
-#                        Funnel stays OFF). With no --host, the node's MagicDNS
-#                        name is used. Reach it from any device on your tailnet —
-#                        anywhere — with no public IP or port-forward.
+#   --tailscale          Install Tailscale and bring the node up; serve the
+#                        dashboard at dash.<tailscale-ip>.nip.io via Traefik
+#                        (Funnel stays OFF). The tailnet routes that IP from any
+#                        device, anywhere — no public IP, port-forward, subnet
+#                        route or admin approval; only the dashboard is exposed.
 #   --ts-authkey <key>   Tailscale auth key for an unattended `tailscale up`
 #                        (mint at login.tailscale.com/admin/settings/keys). Omit
 #                        to authenticate interactively in the browser.
@@ -218,13 +218,14 @@ ensure_stack() {
   ( cd "$DIR" && docker compose -p stack -f stack.compose.yml up -d ) || die "failed to bring up the stack"
 }
 
-# Install Tailscale and bring the node up so --tailscale can front the dashboard
-# with `tailscale serve` (done later, after the stack is up). This is the
-# "reach it from anywhere" path: HTTPS terminated on your tailnet with the
-# Tailscale-User-Login identity header injected, no public IP / port-forward, and
-# Funnel (public exposure) stays OFF. Node auth (`tailscale up`) is OAuth/browser
-# unless --ts-authkey is given, so a piped, non-interactive run needs the key —
-# it can't be fully automated otherwise. Idempotent; gated by --tailscale.
+# Install Tailscale and bring the node up. The dashboard is then reached at
+# dash.<tailscale-ip>.nip.io: the node's 100.x IP is routed through the tailnet
+# from any device, anywhere, and Traefik (the shared stack) routes it by Host on
+# :80 — no public IP / port-forward, no subnet route or admin approval, only the
+# dashboard exposed. Funnel (public exposure) stays OFF. Node auth (`tailscale
+# up`) is OAuth/browser unless --ts-authkey is given, so a piped, non-interactive
+# run needs the key — it can't be fully automated otherwise. Idempotent; gated by
+# --tailscale.
 ensure_tailscale() {
   [ "$TAILSCALE" = "true" ] || return 0
 
@@ -660,8 +661,8 @@ done
 command -v curl >/dev/null 2>&1 || die "curl not found in PATH"
 
 # ── host default: dash.<primary-ip>.nip.io. With --tailscale we instead use the
-# node's MagicDNS name, resolved after `tailscale up` (the daemon must be up to
-# know it), so leave HOST empty here in that case. ──
+# node's Tailscale-IP nip.io host, resolved after `tailscale up` (the daemon must
+# be up to know the IP), so leave HOST empty here in that case. ──
 if [ -z "$HOST" ] && [ "$TAILSCALE" != "true" ]; then
   ip="$(detect_ip)"; ip="${ip:-127.0.0.1}"
   HOST="dash.${ip}.nip.io"
@@ -737,7 +738,7 @@ if [ "$CHECK_ONLY" = "true" ]; then
   if [ "$TAILSCALE" = "true" ]; then
     if command -v tailscale >/dev/null 2>&1; then
       if tailscale status >/dev/null 2>&1; then
-        tailscale status 2>/dev/null | grep -qi 'logged out' && ts_status="installed, logged out (would run 'up')" || ts_status="installed, up (would serve)"
+        tailscale status 2>/dev/null | grep -qi 'logged out' && ts_status="installed, logged out (would run 'up')" || ts_status="installed, up (would route via Traefik)"
       else
         ts_status="installed, daemon down (would start)"
       fi
@@ -745,10 +746,10 @@ if [ "$CHECK_ONLY" = "true" ]; then
       ts_status="$([ "$BOOTSTRAP" = true ] && echo "absent (would install)" || echo "absent — FAILS without bootstrap")"
     fi
   fi
-  log "check: host=${HOST:-<MagicDNS auto>}, image=$IMAGE, auth=license-session, identity=${identity:-none}, bootstrap=$BOOTSTRAP"
+  log "check: host=${HOST:-<tailscale-ip nip.io>}, image=$IMAGE, auth=license-session, identity=${identity:-none}, bootstrap=$BOOTSTRAP"
   log "       docker=$docker_status, stack_web=$net_status, compose=$compose_status"
   log "       git=$git_status, node=$node_status"
-  [ "$TAILSCALE" = "true" ] && log "       tailscale=$ts_status (serve https→443→127.0.0.1:3001, Funnel OFF)"
+  [ "$TAILSCALE" = "true" ] && log "       tailscale=$ts_status (Traefik http→dash.<ts-ip>.nip.io, Funnel OFF)"
   ws_status="$([ -d "$WORKSPACE_DIR" ] && echo "owner=$(stat -c '%U' "$WORKSPACE_DIR" 2>/dev/null || echo '?')" || echo "$([ "$BOOTSTRAP" = true ] && echo "absent (would create)" || echo "absent — clone fails")")"
   log "       executor($EXECUTOR_USER)=$exec_user_status, sshd=$sshd_status, workspace=$ws_status"
   log "       runtimes: $runtimes_status"
@@ -775,21 +776,22 @@ ensure_docker
 ensure_host_tooling
 ensure_stack
 
-# ── Tailscale: install + bring the node up (serve happens after the stack is up) ──
+# ── Tailscale: install + bring the node up ──
 ensure_tailscale
 
-# With --tailscale and no explicit --host, use the node's MagicDNS name (now that
-# the daemon is up). Needs jq to read `tailscale status --json`; install it under
-# bootstrap when missing.
-if [ "$TAILSCALE" = "true" ] && [ -z "$HOST" ]; then
-  if ! command -v jq >/dev/null 2>&1 && [ "$BOOTSTRAP" = "true" ] && command -v apt-get >/dev/null 2>&1; then
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq jq >/dev/null 2>&1 || true
+# Reach it from anywhere via Traefik: serve at dash.<tailscale-ip>.nip.io. The
+# node's 100.x IP is routed through the tailnet from any device (no subnet route
+# or admin approval; only the dashboard is exposed), nip.io resolves the hostname
+# to it from any network, and Traefik routes it by Host on :80. HOST_IP carries
+# the same IP so per-session preview subdomains (dashboard-<sid>.<ip>.nip.io) are
+# reachable remotely too.
+if [ "$TAILSCALE" = "true" ]; then
+  TS_IP="$(tailscale ip -4 2>/dev/null | head -1)"
+  [ -n "$TS_IP" ] || die "could not read the Tailscale IP (is 'tailscale up' done?) — re-run, or pass --host"
+  if [ -z "$HOST" ]; then
+    HOST="dash.${TS_IP}.nip.io"
+    log "using Tailscale host $HOST"
   fi
-  if command -v jq >/dev/null 2>&1; then
-    HOST="$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName // empty' | sed 's/\.$//')"
-  fi
-  [ -n "$HOST" ] || die "could not auto-detect the MagicDNS name — pass --host <name>.<tailnet>.ts.net (or install jq)"
-  log "using MagicDNS host $HOST"
 fi
 
 # One-liner support: when piped (curl ... | bash) compose.prod.yml is not on
@@ -836,6 +838,12 @@ ENV_FILE="$DIR/.env"
   fi
   if [ "$TRUST_PROXY" = "true" ]; then
     echo "TRUST_PROXY_AUTH=true"
+  fi
+  # --tailscale: pin HOST_IP to the node's Tailscale IP so per-session preview
+  # subdomains (dashboard-<sid>.<ip>.nip.io) resolve to the tailnet-routable IP
+  # and are reachable from any device, like the main host.
+  if [ "$TAILSCALE" = "true" ] && [ -n "${TS_IP:-}" ]; then
+    echo "HOST_IP=$TS_IP"
   fi
   # Run the container as the executor uid (compose `user:` reads these). Keeps
   # files the dashboard writes into the shared /claude and /data binds owned by
@@ -885,18 +893,11 @@ else
   warn "then re-check: curl -fsS http://$HOST/api/health"
 fi
 
-# ── Tailscale Serve: front the loopback port with HTTPS on the tailnet. Serve
-# (L7) terminates TLS and injects the Tailscale-User-Login identity header;
-# Funnel stays OFF so nothing is exposed to the public internet. Reachable from
-# any device on the tailnet at https://$HOST. ──
+# ── Tailscale reachability note. Traefik already serves $HOST (the Tailscale-IP
+# nip.io host) on :80; the tailnet routes that 100.x IP from anywhere, so no
+# serve/Funnel is configured — nothing is exposed to the public internet. ──
 if [ "$TAILSCALE" = "true" ]; then
-  log "exposing over Tailscale Serve (https://$HOST → 127.0.0.1:3001; Funnel OFF)"
-  if tailscale serve --bg --https=443 http://127.0.0.1:3001; then
-    log "tailscale serve active — reachable from any device on your tailnet at https://$HOST"
-  else
-    warn "tailscale serve failed — once Tailscale is up, run it manually:"
-    warn "  sudo tailscale serve --bg --https=443 http://127.0.0.1:3001"
-  fi
+  log "reachable from any device on your tailnet at http://$HOST (Traefik via Tailscale; Funnel OFF)"
 fi
 
 if [ -n "$LICENSE" ]; then
