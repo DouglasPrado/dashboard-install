@@ -112,6 +112,9 @@ jobs:
           docker export "$cid" | tar -t > /tmp/img-files.txt
           bash dashboard-install/ci/check-image-artifacts.sh < /tmp/img-files.txt
 
+      - name: Guard — required runtime artifacts present in image
+        run: bash dashboard-install/ci/check-required-artifacts.sh < /tmp/img-files.txt
+
       - name: Scan image with Trivy (vuln + secret, pre-publish)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
