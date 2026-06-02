@@ -115,6 +115,18 @@ image_is_pinned() { # <image-ref>
   esac
 }
 
+# Rewrite an image ref to point at a digest: repo@sha256:<digest>. Drops any
+# existing @sha256:... (so re-pinning is idempotent) and any :tag — but only when
+# the tag is in the final path segment, so a registry:port (localhost:5000/img)
+# is preserved. Used to pin DASHBOARD_IMAGE to the exact bytes just pulled (TOFU).
+pin_to_digest() { # <image-ref> <sha256:digest>
+  local repo="${1%@*}"               # drop existing @sha256:... if present
+  case "${repo##*/}" in
+    *:*) repo="${repo%:*}" ;;        # final segment carries a :tag → strip it
+  esac
+  printf '%s@%s' "$repo" "$2"
+}
+
 # Write the license token to <dest> as a secret: mode 600, owned by the executor
 # (the container reads it as that uid over the /data bind). The license is the
 # login credential — never leave it world-readable.
@@ -377,14 +389,17 @@ install_runtime() { # <runtime-id>
   fi
 
   log "installing runtime $id ($bin) for $EXECUTOR_USER"
+  local home; home="$(getent passwd "$EXECUTOR_USER" | cut -d: -f6)"
   # pipefail so a failed `curl | bash` (e.g. a 404 feeding an empty script to a
   # shell that then exits 0) is reported as a failure instead of a false success.
-  if ! runuser -u "$EXECUTOR_USER" -- bash -lc "set -o pipefail; $cmd"; then
+  # Pin HOME/cwd to the executor home: `runuser -u` keeps the caller's /root, and
+  # an installer that drops temp/state files cwd-relative (codex does) cannot
+  # write to /root as a non-root user → spurious "install failed".
+  if ! runuser -u "$EXECUTOR_USER" -- bash -lc "export HOME='$home'; cd '$home' || exit 1; set -o pipefail; $cmd"; then
     warn "runtime $id install failed — install '$bin' manually for $EXECUTOR_USER and symlink to /usr/local/bin/$bin"
     return 0
   fi
 
-  local home; home="$(getent passwd "$EXECUTOR_USER" | cut -d: -f6)"
   if src="$(resolve_runtime_bin "$bin" "$home")"; then
     ln -sf "$src" "/usr/local/bin/$bin"
     log "runtime $id ready: $bin -> $src"
@@ -414,7 +429,15 @@ install_caveman() {
   # Caveman installer is a Node script that detects installed runtimes and
   # configures hooks/settings.json. Run as the executor user with explicit
   # --config-dir and NPM_CONFIG_PREFIX to avoid writing to /root/.agents.
+  #
+  # `runuser -u` keeps the CALLER's HOME (/root) and cwd (/root) — it sets the
+  # uid but not the login environment. The caveman installer shells out to
+  # `claude mcp add` and `npx skills add`, which resolve config paths from $HOME
+  # and cwd; left as /root they fail with EACCES (skills → /root/.agents) or
+  # register at the wrong scope (MCP → [project: /root]). Pin both to the
+  # executor home so everything lands under ~claude-bots.
   if ! runuser -u "$EXECUTOR_USER" -- bash -lc "
+    export HOME='$home'; cd '$home' || exit 1
     command -v node >/dev/null 2>&1 || { echo 'node required for caveman'; exit 1; }
     export NPM_CONFIG_PREFIX='$home/.npm-global'
     export npm_config_prefix='$home/.npm-global'
@@ -425,6 +448,18 @@ install_caveman() {
     warn "caveman install failed — agents will work without token compression"
     return 0
   fi
+
+  # caveman's installer registers the caveman-shrink MCP at LOCAL scope (bound to
+  # the install cwd), so it would only load for agents whose cwd happens to match.
+  # Re-register at USER scope so it applies to every project the dashboard's
+  # agents run in. Best-effort: skip silently if the claude CLI or the MCP isn't
+  # present. `mcp add` is idempotent on re-runs (overwrites the user entry).
+  runuser -u "$EXECUTOR_USER" -- bash -lc "
+    export HOME='$home'; cd '$home' || exit 1
+    command -v claude >/dev/null 2>&1 || exit 0
+    claude mcp remove caveman-shrink >/dev/null 2>&1 || true
+    claude mcp add caveman-shrink --scope user -- npx -y caveman-shrink >/dev/null 2>&1 || true
+  " || true
 
   log "caveman ready: agents will use compressed token mode by default"
 }
@@ -447,7 +482,10 @@ install_rtk() {
   log "installing RTK for $EXECUTOR_USER (bash command token compression)"
   # RTK installer is a shell script that installs to ~/.local/bin.
   # Run as the executor user. Then initialize the hook for Claude Code.
+  # Pin HOME/cwd to the executor home so `~` resolves to ~claude-bots (not the
+  # caller's /root that `runuser -u` leaves in place).
   if ! runuser -u "$EXECUTOR_USER" -- bash -lc "
+    export HOME='$home'; cd '$home' || exit 1
     curl -fsSL $RTK_INSTALL_URL | sh
     [ -x ~/.local/bin/rtk ] || { echo 'rtk binary not found'; exit 1; }
     ~/.local/bin/rtk init -g --auto-patch
@@ -879,7 +917,26 @@ if [ -n "$LICENSE" ]; then
   log "license written to data/license.key (mode 600)"
 fi
 
+# ── pull + auto-pin to digest ──
+# Pull first, then pin DASHBOARD_IMAGE to the immutable digest of the exact bytes
+# we just pulled (trust-on-first-use). The app container mounts the Docker socket
+# (root-equivalent on the host), so it must run KNOWN bytes — a floating tag can
+# be swapped by a compromised/MITM'd registry on the next `compose up`. Resolving
+# here makes a digest pin the default for every install, even when the operator
+# passes :latest. An already-pinned --image is pulled and re-pinned to itself
+# (no-op). If the digest can't be resolved (e.g. a local-only image), fall back
+# to the tag and warn instead of aborting.
+log "pulling $IMAGE"
+docker pull "$IMAGE"
+if _repo_digest="$(docker image inspect --format '{{index .RepoDigests 0}}' "$IMAGE" 2>/dev/null)" && [ -n "$_repo_digest" ]; then
+  IMAGE="$(pin_to_digest "$IMAGE" "${_repo_digest##*@}")"
+  log "pinned image to digest: $IMAGE"
+else
+  warn "could not resolve a registry digest for '$IMAGE' — running the socket-mounted container on a mutable tag. Re-run once the registry has a digest, or pass --image ${IMAGE%%:*}@sha256:<digest> (resolve with: docker buildx imagetools inspect $IMAGE)"
+fi
+
 # ── .env (no secrets from the distribution; only what the operator supplied) ──
+# DASHBOARD_IMAGE is the digest-pinned ref resolved just above.
 ENV_FILE="$DIR/.env"
 {
   echo "DASHBOARD_HOST=$HOST"
@@ -910,14 +967,7 @@ ENV_FILE="$DIR/.env"
 chmod 600 "$ENV_FILE"
 log "wrote $ENV_FILE (mode 600)"
 
-# ── pull + up ──
-# Warn (don't block) on a mutable image tag. The privileged orchestrator should
-# pull immutable bytes; a floating tag can be swapped by a compromised registry.
-if ! image_is_pinned "$IMAGE"; then
-  warn "image '$IMAGE' is not digest-pinned — a mutable tag can be swapped by a compromised/MITM'd registry, and this container mounts the Docker socket (root-equivalent on the host). Pin a digest: --image ${IMAGE%%:*}@sha256:<digest> (resolve with: docker buildx imagetools inspect $IMAGE)"
-fi
-log "pulling $IMAGE"
-docker pull "$IMAGE"
+# ── up ── (image already pulled and digest-pinned above)
 log "starting dashboard"
 ( cd "$DIR" && docker compose -f compose.prod.yml up -d )
 
