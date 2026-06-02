@@ -22,7 +22,11 @@ trap 'rm -rf "$TMP"' EXIT
 cp "$COMPOSE" "$TMP/compose.prod.yml"
 : > "$TMP/.env"
 
+# EXECUTOR_UID/GID are now mandatory (${VAR:?}) — the docker.sock-mounted
+# container must never silently fall back to root. install.sh writes them to
+# .env; supply them here so the render resolves.
 out="$(DASHBOARD_HOST=test.example DASHBOARD_IMAGE=img:test \
+      EXECUTOR_UID=1000 EXECUTOR_GID=1000 \
       docker compose -f "$TMP/compose.prod.yml" config 2>&1)" || {
   echo "FAIL: compose config did not parse"
   echo "$out"
@@ -30,6 +34,16 @@ out="$(DASHBOARD_HOST=test.example DASHBOARD_IMAGE=img:test \
 }
 
 fails=0
+
+# Fail-closed identity: omitting EXECUTOR_UID must make `config` abort, not
+# render a uid-0 container. Proves the ${VAR:?} guard, not a :-0 fallback.
+if DASHBOARD_HOST=test.example DASHBOARD_IMAGE=img:test \
+     docker compose -f "$TMP/compose.prod.yml" config >/dev/null 2>&1; then
+  echo "FAIL: compose config resolved without EXECUTOR_UID (should fail closed)"
+  fails=1
+else
+  echo "ok   config fails closed when EXECUTOR_UID is unset"
+fi
 assert_rendered() { # <label> <pattern>
   local label="$1" pat="$2"
   if grep -qE "$pat" <<<"$out"; then

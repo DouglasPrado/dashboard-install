@@ -24,6 +24,23 @@ assert_grep() { # <label> <pattern>
     fails=$((fails + 1))
   fi
 }
+assert_no_grep() { # <label> <pattern>
+  local label="$1" pat="$2"
+  if grep -qE "$pat" "$COMPOSE"; then
+    printf 'FAIL %s\n       unexpected pattern: %s\n' "$label" "$pat"
+    fails=$((fails + 1))
+  else
+    printf 'ok   %s\n' "$label"
+  fi
+}
+
+# Fail-closed identity: the container mounts docker.sock (root-equivalent), so
+# running as uid 0 when .env is missing is a privilege-escalation foot-gun. The
+# `user:` must hard-require EXECUTOR_UID/GID (${VAR:?}) instead of defaulting to
+# 0 (${VAR:-0}) — a bare `compose up` with no .env must error, not run as root.
+assert_grep    "user requires EXECUTOR_UID"  'user:.*\$\{EXECUTOR_UID:\?'
+assert_grep    "user requires EXECUTOR_GID"  '\$\{EXECUTOR_GID:\?'
+assert_no_grep "user has no root fallback"   'user:.*:-0'
 
 # Least-privilege keys.
 assert_grep "read-only rootfs"        '^\s*read_only:\s*true\s*$'
