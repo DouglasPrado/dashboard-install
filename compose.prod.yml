@@ -85,8 +85,9 @@ services:
     # with node's global fetch (no curl/wget needed — survives read_only +
     # cap_drop:ALL). NOTE: `restart: unless-stopped` does NOT act on health, so
     # this gives observability (docker ps + the dashboard's own container panel,
-    # which reads the /(unhealthy)/ status) — not auto-restart. Auto-heal on
-    # unhealthy needs an external watcher (e.g. willfarrell/autoheal); deferred.
+    # which reads the /(unhealthy)/ status) — not auto-restart. Opt into the
+    # `autoheal` service below to restart this container when it goes unhealthy:
+    #   docker compose -f compose.prod.yml --profile autoheal up -d
     healthcheck:
       test:
         - CMD
@@ -105,6 +106,26 @@ services:
       - traefik.http.routers.dashboard.entrypoints=web
       # O server de produção serve SPA + API na mesma porta (3001); sem vite.
       - traefik.http.services.dashboard.loadbalancer.server.port=3001
+      # Marks this container for the opt-in autoheal watcher (below).
+      - autoheal=true
+
+  # Opt-in auto-restart for the app when its healthcheck goes unhealthy. OFF by
+  # default (profile-gated): enable with `--profile autoheal`. It only restarts
+  # containers labelled autoheal=true. SECURITY: like the app, it mounts the
+  # Docker socket (RW — it must POST /restart), so it is privileged host access.
+  # Don't enable it unless you accept a second socket-bearing container.
+  autoheal:
+    image: willfarrell/autoheal:1.2.0
+    container_name: dashboard-autoheal
+    profiles: ["autoheal"]
+    restart: unless-stopped
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=autoheal
+      - AUTOHEAL_INTERVAL=15
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    security_opt:
+      - no-new-privileges:true
 
 networks:
   stack_web:
