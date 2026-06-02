@@ -62,13 +62,10 @@ services:
     # host gateway so the container can SSH back to the host executor.
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    # Publish the API/SPA port to the host LOOPBACK only, so a host-side reverse
-    # proxy can reach it without exposing it on a public NIC. `install.sh
-    # --tailscale` fronts this with `tailscale serve` (HTTPS on the tailnet, the
-    # Tailscale-User-Login identity header injected, Funnel OFF) — reachable from
-    # any device on your tailnet with no public IP or port-forward. Traefik still
-    # routes the same app via stack_web; this is a second, loopback-only door.
-    # Never bind 0.0.0.0 here — that would expose the dashboard publicly.
+    # Publish the API/SPA port to the host LOOPBACK only — a second, local-only
+    # door for a host-side reverse proxy or local debugging, without exposing it
+    # on a public NIC. The --tailscale flow does NOT use this (Traefik routes the
+    # tailnet IP); it stays for optional host-local proxies. Never bind 0.0.0.0.
     ports:
       - "127.0.0.1:3001:3001"
     security_opt:
