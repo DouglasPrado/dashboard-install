@@ -35,6 +35,31 @@ already present (just installs the dashboard). `--password` / `--trust-proxy`
 are optional and only add an operator identity for admin-role authz; they are
 not required to boot or to log in.
 
+## Reach it from anywhere (Tailscale)
+
+Pass `--tailscale` to install Tailscale, bring the host into your tailnet, and
+front the dashboard with **Tailscale Serve** — HTTPS terminated on the tailnet,
+the `Tailscale-User-Login` identity header injected, and **Funnel kept OFF** so
+nothing is exposed to the public internet. You then reach it from any device on
+your tailnet (phone, laptop — any network, anywhere) with no public IP and no
+port-forward. With no `--host`, the node's MagicDNS name is used automatically.
+
+```bash
+sudo ./install.sh --tailscale --license <key> \
+  --image ghcr.io/douglasprado/dashboard-install@sha256:<digest>
+# unattended: provide a Tailscale auth key so `tailscale up` doesn't need a browser
+sudo ./install.sh --tailscale --ts-authkey tskey-auth-... --license <key>
+```
+
+What stays interactive (OAuth/browser, can't be automated): `tailscale up`
+without `--ts-authkey`, and each runtime's one-time login (`claude /login`, etc.).
+
+The compose file publishes the app on `127.0.0.1:3001` (loopback only) for Serve
+to proxy. **Firewall is not automated**: the executor reaches the host over the
+Docker bridge (not `tailscale0`), so a naive `ufw default deny + allow tailscale0`
+would break agent runs — see the dashboard's `docs/RUNBOOK.md` for a host firewall
+that allows both.
+
 ## Don't pipe blind
 
 `curl | bash` runs code you didn't read. Before trusting it:
