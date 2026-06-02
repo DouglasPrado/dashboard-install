@@ -115,6 +115,18 @@ image_is_pinned() { # <image-ref>
   esac
 }
 
+# Rewrite an image ref to point at a digest: repo@sha256:<digest>. Drops any
+# existing @sha256:... (so re-pinning is idempotent) and any :tag — but only when
+# the tag is in the final path segment, so a registry:port (localhost:5000/img)
+# is preserved. Used to pin DASHBOARD_IMAGE to the exact bytes just pulled (TOFU).
+pin_to_digest() { # <image-ref> <sha256:digest>
+  local repo="${1%@*}"               # drop existing @sha256:... if present
+  case "${repo##*/}" in
+    *:*) repo="${repo%:*}" ;;        # final segment carries a :tag → strip it
+  esac
+  printf '%s@%s' "$repo" "$2"
+}
+
 # Write the license token to <dest> as a secret: mode 600, owned by the executor
 # (the container reads it as that uid over the /data bind). The license is the
 # login credential — never leave it world-readable.
@@ -893,7 +905,26 @@ if [ -n "$LICENSE" ]; then
   log "license written to data/license.key (mode 600)"
 fi
 
+# ── pull + auto-pin to digest ──
+# Pull first, then pin DASHBOARD_IMAGE to the immutable digest of the exact bytes
+# we just pulled (trust-on-first-use). The app container mounts the Docker socket
+# (root-equivalent on the host), so it must run KNOWN bytes — a floating tag can
+# be swapped by a compromised/MITM'd registry on the next `compose up`. Resolving
+# here makes a digest pin the default for every install, even when the operator
+# passes :latest. An already-pinned --image is pulled and re-pinned to itself
+# (no-op). If the digest can't be resolved (e.g. a local-only image), fall back
+# to the tag and warn instead of aborting.
+log "pulling $IMAGE"
+docker pull "$IMAGE"
+if _repo_digest="$(docker image inspect --format '{{index .RepoDigests 0}}' "$IMAGE" 2>/dev/null)" && [ -n "$_repo_digest" ]; then
+  IMAGE="$(pin_to_digest "$IMAGE" "${_repo_digest##*@}")"
+  log "pinned image to digest: $IMAGE"
+else
+  warn "could not resolve a registry digest for '$IMAGE' — running the socket-mounted container on a mutable tag. Re-run once the registry has a digest, or pass --image ${IMAGE%%:*}@sha256:<digest> (resolve with: docker buildx imagetools inspect $IMAGE)"
+fi
+
 # ── .env (no secrets from the distribution; only what the operator supplied) ──
+# DASHBOARD_IMAGE is the digest-pinned ref resolved just above.
 ENV_FILE="$DIR/.env"
 {
   echo "DASHBOARD_HOST=$HOST"
@@ -924,14 +955,7 @@ ENV_FILE="$DIR/.env"
 chmod 600 "$ENV_FILE"
 log "wrote $ENV_FILE (mode 600)"
 
-# ── pull + up ──
-# Warn (don't block) on a mutable image tag. The privileged orchestrator should
-# pull immutable bytes; a floating tag can be swapped by a compromised registry.
-if ! image_is_pinned "$IMAGE"; then
-  warn "image '$IMAGE' is not digest-pinned — a mutable tag can be swapped by a compromised/MITM'd registry, and this container mounts the Docker socket (root-equivalent on the host). Pin a digest: --image ${IMAGE%%:*}@sha256:<digest> (resolve with: docker buildx imagetools inspect $IMAGE)"
-fi
-log "pulling $IMAGE"
-docker pull "$IMAGE"
+# ── up ── (image already pulled and digest-pinned above)
 log "starting dashboard"
 ( cd "$DIR" && docker compose -f compose.prod.yml up -d )
 
