@@ -38,11 +38,18 @@ not required to boot or to log in.
 ## Reach it from anywhere (Tailscale)
 
 Pass `--tailscale` to install Tailscale, bring the host into your tailnet, and
-front the dashboard with **Tailscale Serve** — HTTPS terminated on the tailnet,
-the `Tailscale-User-Login` identity header injected, and **Funnel kept OFF** so
-nothing is exposed to the public internet. You then reach it from any device on
-your tailnet (phone, laptop — any network, anywhere) with no public IP and no
-port-forward. With no `--host`, the node's MagicDNS name is used automatically.
+serve the dashboard at `dash.<tailscale-ip>.nip.io` **through Traefik**. The
+node's `100.x` Tailscale IP is routed across the tailnet from any device, `nip.io`
+resolves the hostname to it from any network, and Traefik (the shared stack)
+routes it by Host on `:80`. So you reach it from any device on your tailnet
+(phone, laptop — any network, anywhere) with **no public IP, no port-forward, no
+subnet route or admin approval** — and only the dashboard is exposed (not the
+whole LAN). **Funnel stays OFF**: nothing is published to the public internet.
+With no `--host`, `dash.<tailscale-ip>.nip.io` is used automatically.
+
+Per-session preview subdomains (`dashboard-<sid>.<ip>.nip.io`) inherit the same
+IP via `HOST_IP`, so previews are reachable remotely too — Traefik routes them
+the same way (this is why Traefik, not Tailscale Serve, fronts the app).
 
 ```bash
 sudo ./install.sh --tailscale --license <key> \
@@ -51,14 +58,15 @@ sudo ./install.sh --tailscale --license <key> \
 sudo ./install.sh --tailscale --ts-authkey tskey-auth-... --license <key>
 ```
 
-What stays interactive (OAuth/browser, can't be automated): `tailscale up`
-without `--ts-authkey`, and each runtime's one-time login (`claude /login`, etc.).
+Access is over HTTP, but tailnet traffic is already encrypted end-to-end by
+Tailscale (WireGuard). What stays interactive (OAuth/browser, can't be
+automated): `tailscale up` without `--ts-authkey`, and each runtime's one-time
+login (`claude /login`, etc.).
 
-The compose file publishes the app on `127.0.0.1:3001` (loopback only) for Serve
-to proxy. **Firewall is not automated**: the executor reaches the host over the
-Docker bridge (not `tailscale0`), so a naive `ufw default deny + allow tailscale0`
-would break agent runs — see the dashboard's `docs/RUNBOOK.md` for a host firewall
-that allows both.
+**Firewall is not automated**: the executor reaches the host over the Docker
+bridge (not `tailscale0`), so a naive `ufw default deny + allow tailscale0` would
+break agent runs — see the dashboard's `docs/RUNBOOK.md` for a host firewall that
+allows both.
 
 ## Don't pipe blind
 
