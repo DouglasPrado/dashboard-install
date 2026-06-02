@@ -93,6 +93,25 @@ die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 sha256() { command -v sha256sum >/dev/null 2>&1 && sha256sum "$1" | cut -d' ' -f1 || shasum -a 256 "$1" | cut -d' ' -f1; }
 detect_ip() { ip -4 -o route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1; }
 
+# Validate the --host value before it lands in the Traefik label rule
+# (Host(`...`)). Reject anything outside the DNS charset — backticks, quotes,
+# spaces, $ — that would corrupt the compose label and silently break routing.
+valid_host() { # <host>
+  case "$1" in
+    ""|*[!a-zA-Z0-9.-]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# Write the license token to <dest> as a secret: mode 600, owned by the executor
+# (the container reads it as that uid over the /data bind). The license is the
+# login credential — never leave it world-readable.
+write_license() { # <token> <dest> <owner>
+  ( umask 077; printf '%s\n' "$1" > "$2" )
+  chmod 600 "$2"
+  chown "$3:$3" "$2" 2>/dev/null || true
+}
+
 # True when something is listening on TCP :22 (the executor SSH endpoint the
 # dashboard reaches over host.docker.internal). Used to verify sshd actually
 # came up, since enabling it can silently no-op on minimal/LXC hosts.
@@ -346,7 +365,9 @@ install_runtime() { # <runtime-id>
   fi
 
   log "installing runtime $id ($bin) for $EXECUTOR_USER"
-  if ! runuser -u "$EXECUTOR_USER" -- bash -lc "$cmd"; then
+  # pipefail so a failed `curl | bash` (e.g. a 404 feeding an empty script to a
+  # shell that then exits 0) is reported as a failure instead of a false success.
+  if ! runuser -u "$EXECUTOR_USER" -- bash -lc "set -o pipefail; $cmd"; then
     warn "runtime $id install failed — install '$bin' manually for $EXECUTOR_USER and symlink to /usr/local/bin/$bin"
     return 0
   fi
@@ -386,7 +407,7 @@ install_caveman() {
     export NPM_CONFIG_PREFIX='$home/.npm-global'
     export npm_config_prefix='$home/.npm-global'
     mkdir -p '$home/.npm-global/bin'
-    export PATH=\"\$PATH:'$home/.npm-global/bin'\"
+    export PATH=\"\$PATH:$home/.npm-global/bin\"
     curl -fsSL $CAVEMAN_INSTALL_URL | bash -s -- --non-interactive --with-hooks --config-dir '$home/.claude'
   "; then
     warn "caveman install failed — agents will work without token compression"
@@ -519,10 +540,16 @@ ensure_executor() {
     chown -R "$EXECUTOR_USER:$EXECUTOR_USER" "$home/.claude" 2>/dev/null || true
   fi
 
-  # 2. authorize the dashboard's generated key (append-once, idempotent)
+  # 2. authorize the dashboard's generated key. Prune any prior dashboard-tagged
+  #    keys first (comment "dashboard@...") so a regenerated key never leaves a
+  #    stale entry that still grants host access, then append the current one once.
   install -d -m 700 -o "$EXECUTOR_USER" -g "$EXECUTOR_USER" "$home/.ssh"
   local ak="$home/.ssh/authorized_keys" pub
   pub="$(cat "$SSH_KEY.pub")"
+  if [ -f "$ak" ] && grep -q ' dashboard@' "$ak"; then
+    grep -v ' dashboard@' "$ak" > "$ak.tmp" || true
+    mv "$ak.tmp" "$ak"
+  fi
   if [ ! -f "$ak" ] || ! grep -qF "$pub" "$ak"; then
     printf '%s\n' "$pub" >> "$ak"
     log "authorized dashboard key for $EXECUTOR_USER"
@@ -664,9 +691,19 @@ command -v curl >/dev/null 2>&1 || die "curl not found in PATH"
 # node's Tailscale-IP nip.io host, resolved after `tailscale up` (the daemon must
 # be up to know the IP), so leave HOST empty here in that case. ──
 if [ -z "$HOST" ] && [ "$TAILSCALE" != "true" ]; then
-  ip="$(detect_ip)"; ip="${ip:-127.0.0.1}"
+  ip="$(detect_ip)"
+  if [ -z "$ip" ]; then
+    ip="127.0.0.1"
+    warn "could not detect a primary IP; defaulting host to 127.0.0.1 — the dashboard will be reachable only on this host. Pass --host <name> for a reachable address."
+  fi
   HOST="dash.${ip}.nip.io"
   log "no --host given; defaulting to $HOST"
+fi
+
+# Reject a malformed --host before it reaches the Traefik label (empty HOST is
+# fine here — the Tailscale path fills it after `tailscale up`).
+if [ -n "$HOST" ] && ! valid_host "$HOST"; then
+  die "invalid --host '$HOST' — use a DNS name (letters, digits, dots, hyphens); it becomes a Traefik Host() rule"
 fi
 
 # ── auth: the license-key session gates every API route, so the dashboard boots
@@ -822,10 +859,10 @@ ensure_executor
 # user — otherwise the non-root process can't open its own database.
 chown -R "$EXECUTOR_USER:$EXECUTOR_USER" "$DIR/data"
 
-# ── license ──
+# ── license ── (secret: 600, owned by the executor — see write_license)
 if [ -n "$LICENSE" ]; then
-  printf '%s\n' "$LICENSE" > "$DIR/data/license.key"
-  log "license written to data/license.key"
+  write_license "$LICENSE" "$DIR/data/license.key" "$EXECUTOR_USER"
+  log "license written to data/license.key (mode 600)"
 fi
 
 # ── .env (no secrets from the distribution; only what the operator supplied) ──

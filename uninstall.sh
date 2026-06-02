@@ -120,19 +120,21 @@ remove_runtimes() {
     return 0
   fi
 
-  local runtimes="claude opencode codex cursor-agent"
+  # rtk is symlinked alongside the runtime CLIs by install.sh's install_rtk.
+  local runtimes="claude opencode codex cursor-agent rtk"
   local bin removed=0
+  local bindir="${BIN_DIR:-/usr/local/bin}"   # overridable for tests
 
   for bin in $runtimes; do
-    local path="/usr/local/bin/$bin"
+    local path="$bindir/$bin"
     if [ -L "$path" ]; then
       log "removing runtime symlink: $path"
       if [ "$CHECK_ONLY" = "true" ]; then
         echo "would remove: $path"
-        ((removed++))
+        removed=$((removed + 1))
         continue
       fi
-      rm -f "$path" && ((removed++))
+      rm -f "$path" && removed=$((removed + 1))
     fi
   done
 
@@ -167,10 +169,23 @@ restore_workspace() {
   chown -R root:root "$WORKSPACE_DIR"
 }
 
-# Remove /root traverse permission if added
+# Revert the /root traverse grant install.sh added for the executor. It prefers
+# a targeted ACL (setfacl -m u:claude-bots:x /root) and falls back to o+x, so
+# undo BOTH: drop the ACL entry, then strip o+x if it was used.
 restore_root_perms() {
   if ! has_component "workspace" && ! has_component "all"; then
     return 0
+  fi
+
+  # ACL entry (the preferred grant). getfacl shows it only when present.
+  if command -v getfacl >/dev/null 2>&1 \
+     && getfacl -p /root 2>/dev/null | grep -q "^user:$EXECUTOR_USER:"; then
+    log "removing $EXECUTOR_USER traverse ACL from /root"
+    if [ "$CHECK_ONLY" = "true" ]; then
+      echo "would run: setfacl -x u:$EXECUTOR_USER /root"
+    else
+      setfacl -x "u:$EXECUTOR_USER" /root 2>/dev/null || warn "could not remove ACL from /root"
+    fi
   fi
 
   local perms
@@ -238,8 +253,16 @@ clean_files() {
   done
 }
 
-# Stack removal (Traefik, network) — ONLY if no other containers use it
+# Stack removal (Traefik + the stack_web network). The stack is SHARED infra —
+# other projects on the host route through the same Traefik — so it is never
+# removed on a default ("all") uninstall; request it explicitly with
+# --components stack. Even then, only tear it down when nothing else is attached.
 remove_stack() {
+  # Explicit-only: "all" deliberately leaves the shared stack in place.
+  if [ "$COMPONENTS" = "all" ]; then
+    log "leaving shared stack (Traefik + stack_web) in place — use --components stack to remove it"
+    return 0
+  fi
   if ! has_component "stack"; then
     return 0
   fi
@@ -249,11 +272,24 @@ remove_stack() {
     return 0
   fi
 
+  # Bring down the stack compose project first — otherwise stack-traefik stays
+  # attached to the network and the count below never reaches zero (the reason
+  # this step used to be a silent no-op).
+  local stack_compose="$DIR/stack.compose.yml"
+  if [ -f "$stack_compose" ]; then
+    log "stopping the shared stack project (Traefik)"
+    if [ "$CHECK_ONLY" = "true" ]; then
+      echo "would run: docker compose -p stack -f stack.compose.yml down"
+    else
+      ( cd "$DIR" && docker compose -p stack -f stack.compose.yml down ) || warn "stack compose down failed"
+    fi
+  fi
+
   local container_count
   container_count="$(docker network inspect stack_web --format '{{len .Containers}}' 2>/dev/null || echo "0")"
 
   if [ "$container_count" -gt 0 ]; then
-    warn "stack_web network has $container_count containers — not removing (--force-stack to override)"
+    warn "stack_web network still has $container_count containers attached — not removing it (other projects use it)"
     return 0
   fi
 
@@ -263,7 +299,7 @@ remove_stack() {
     return 0
   fi
 
-  docker network rm stack_web
+  docker network rm stack_web 2>/dev/null || warn "could not remove stack_web (still in use?)"
 }
 
 usage() {
