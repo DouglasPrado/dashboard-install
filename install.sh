@@ -377,14 +377,17 @@ install_runtime() { # <runtime-id>
   fi
 
   log "installing runtime $id ($bin) for $EXECUTOR_USER"
+  local home; home="$(getent passwd "$EXECUTOR_USER" | cut -d: -f6)"
   # pipefail so a failed `curl | bash` (e.g. a 404 feeding an empty script to a
   # shell that then exits 0) is reported as a failure instead of a false success.
-  if ! runuser -u "$EXECUTOR_USER" -- bash -lc "set -o pipefail; $cmd"; then
+  # Pin HOME/cwd to the executor home: `runuser -u` keeps the caller's /root, and
+  # an installer that drops temp/state files cwd-relative (codex does) cannot
+  # write to /root as a non-root user → spurious "install failed".
+  if ! runuser -u "$EXECUTOR_USER" -- bash -lc "export HOME='$home'; cd '$home' || exit 1; set -o pipefail; $cmd"; then
     warn "runtime $id install failed — install '$bin' manually for $EXECUTOR_USER and symlink to /usr/local/bin/$bin"
     return 0
   fi
 
-  local home; home="$(getent passwd "$EXECUTOR_USER" | cut -d: -f6)"
   if src="$(resolve_runtime_bin "$bin" "$home")"; then
     ln -sf "$src" "/usr/local/bin/$bin"
     log "runtime $id ready: $bin -> $src"
@@ -414,7 +417,15 @@ install_caveman() {
   # Caveman installer is a Node script that detects installed runtimes and
   # configures hooks/settings.json. Run as the executor user with explicit
   # --config-dir and NPM_CONFIG_PREFIX to avoid writing to /root/.agents.
+  #
+  # `runuser -u` keeps the CALLER's HOME (/root) and cwd (/root) — it sets the
+  # uid but not the login environment. The caveman installer shells out to
+  # `claude mcp add` and `npx skills add`, which resolve config paths from $HOME
+  # and cwd; left as /root they fail with EACCES (skills → /root/.agents) or
+  # register at the wrong scope (MCP → [project: /root]). Pin both to the
+  # executor home so everything lands under ~claude-bots.
   if ! runuser -u "$EXECUTOR_USER" -- bash -lc "
+    export HOME='$home'; cd '$home' || exit 1
     command -v node >/dev/null 2>&1 || { echo 'node required for caveman'; exit 1; }
     export NPM_CONFIG_PREFIX='$home/.npm-global'
     export npm_config_prefix='$home/.npm-global'
@@ -447,7 +458,10 @@ install_rtk() {
   log "installing RTK for $EXECUTOR_USER (bash command token compression)"
   # RTK installer is a shell script that installs to ~/.local/bin.
   # Run as the executor user. Then initialize the hook for Claude Code.
+  # Pin HOME/cwd to the executor home so `~` resolves to ~claude-bots (not the
+  # caller's /root that `runuser -u` leaves in place).
   if ! runuser -u "$EXECUTOR_USER" -- bash -lc "
+    export HOME='$home'; cd '$home' || exit 1
     curl -fsSL $RTK_INSTALL_URL | sh
     [ -x ~/.local/bin/rtk ] || { echo 'rtk binary not found'; exit 1; }
     ~/.local/bin/rtk init -g --auto-patch
