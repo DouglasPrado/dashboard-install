@@ -130,3 +130,10 @@ threat-model facts to weigh before selling licenses:
   shell as the executor (owns `/root/workspace`, traverses `/root`, runs agents).
   Narrowing the entry is deferred until the dashboard's exact SSH usage (pty,
   forwarding) is confirmed, so as not to break agent runs.
+- **The executor is in the host `docker` group.** It runs `docker compose` on the
+  host over SSH (update-live, branch-switch restart), which needs access to
+  `docker.sock` (`root:docker`). Membership in the `docker` group is
+  root-equivalent on the host, so a compromise of the `claude-bots` user is a
+  host root compromise. This is the same trust boundary as the unrestricted SSH
+  key above. On rootless/podman hosts (no `docker` group) host-side compose is
+  skipped and the installer warns instead.
