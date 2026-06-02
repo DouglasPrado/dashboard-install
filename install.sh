@@ -449,6 +449,18 @@ install_caveman() {
     return 0
   fi
 
+  # caveman's installer registers the caveman-shrink MCP at LOCAL scope (bound to
+  # the install cwd), so it would only load for agents whose cwd happens to match.
+  # Re-register at USER scope so it applies to every project the dashboard's
+  # agents run in. Best-effort: skip silently if the claude CLI or the MCP isn't
+  # present. `mcp add` is idempotent on re-runs (overwrites the user entry).
+  runuser -u "$EXECUTOR_USER" -- bash -lc "
+    export HOME='$home'; cd '$home' || exit 1
+    command -v claude >/dev/null 2>&1 || exit 0
+    claude mcp remove caveman-shrink >/dev/null 2>&1 || true
+    claude mcp add caveman-shrink --scope user -- npx -y caveman-shrink >/dev/null 2>&1 || true
+  " || true
+
   log "caveman ready: agents will use compressed token mode by default"
 }
 
