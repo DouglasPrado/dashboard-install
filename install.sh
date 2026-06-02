@@ -91,7 +91,11 @@ log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mwarn:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 sha256() { command -v sha256sum >/dev/null 2>&1 && sha256sum "$1" | cut -d' ' -f1 || shasum -a 256 "$1" | cut -d' ' -f1; }
-detect_ip() { ip -4 -o route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1; }
+# Best-effort primary-IP probe. `ip` is Linux-only (iproute2); on macOS/minimal
+# hosts it is absent and the pipeline exits 127, which `pipefail` propagates.
+# The caller assigns this under `set -e`, so it MUST end 0 (emit empty on no
+# match) or it aborts the installer silently, before the platform guard prints.
+detect_ip() { ip -4 -o route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1 || true; }
 
 # Validate the --host value before it lands in the Traefik label rule
 # (Host(`...`)). Reject anything outside the DNS charset — backticks, quotes,
