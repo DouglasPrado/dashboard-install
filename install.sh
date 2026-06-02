@@ -31,6 +31,14 @@
 #                        (DASHBOARD_ADMINS); not required to boot or to log in.
 #   --trust-proxy        Optional. Trust a reverse-proxy identity header as the
 #                        admin-role identity; not required to boot or to log in.
+#   --tailscale          Install Tailscale, bring the node up, and expose the
+#                        dashboard over Tailscale Serve (HTTPS on your tailnet,
+#                        Funnel stays OFF). With no --host, the node's MagicDNS
+#                        name is used. Reach it from any device on your tailnet —
+#                        anywhere — with no public IP or port-forward.
+#   --ts-authkey <key>   Tailscale auth key for an unattended `tailscale up`
+#                        (mint at login.tailscale.com/admin/settings/keys). Omit
+#                        to authenticate interactively in the browser.
 #   --no-bootstrap       Don't install Docker, the stack, or the executor user;
 #                        require them present.
 #   --no-caveman         Skip installing caveman token-compression skill for the
@@ -63,6 +71,7 @@ CURSOR_INSTALL_URL="https://cursor.com/install"
 RUNTIMES_DEFAULT="claude-code,opencode,codex"
 CAVEMAN_INSTALL_URL="https://raw.githubusercontent.com/JuliusBrussee/caveman/main/install.sh"
 RTK_INSTALL_URL="https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh"
+TAILSCALE_INSTALL_URL="https://tailscale.com/install.sh"
 
 HOST=""
 LICENSE=""
@@ -75,6 +84,8 @@ CHECK_ONLY="false"
 RUNTIMES="$RUNTIMES_DEFAULT"
 CAVEMAN="true"
 RTK="true"
+TAILSCALE="false"
+TS_AUTHKEY=""
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mwarn:\033[0m %s\n' "$*" >&2; }
@@ -205,6 +216,50 @@ ensure_stack() {
   fetch "stack.compose.yml" "$DIR/stack.compose.yml"
   fetch "traefik/traefik.yml" "$DIR/traefik/traefik.yml"
   ( cd "$DIR" && docker compose -p stack -f stack.compose.yml up -d ) || die "failed to bring up the stack"
+}
+
+# Install Tailscale and bring the node up so --tailscale can front the dashboard
+# with `tailscale serve` (done later, after the stack is up). This is the
+# "reach it from anywhere" path: HTTPS terminated on your tailnet with the
+# Tailscale-User-Login identity header injected, no public IP / port-forward, and
+# Funnel (public exposure) stays OFF. Node auth (`tailscale up`) is OAuth/browser
+# unless --ts-authkey is given, so a piped, non-interactive run needs the key —
+# it can't be fully automated otherwise. Idempotent; gated by --tailscale.
+ensure_tailscale() {
+  [ "$TAILSCALE" = "true" ] || return 0
+
+  # 1. CLI/daemon
+  if ! command -v tailscale >/dev/null 2>&1; then
+    [ "$BOOTSTRAP" = "true" ] || die "tailscale missing (run without --no-bootstrap to install it, or install Tailscale first)"
+    command -v curl >/dev/null 2>&1 || die "curl is required to install tailscale"
+    log "installing Tailscale"
+    curl -fsSL "$TAILSCALE_INSTALL_URL" | sh || die "tailscale install failed"
+  fi
+
+  # 2. tailscaled must be running. The installer enables it under systemd;
+  #    minimal/WSL hosts without systemd need it started by hand with userspace
+  #    networking (no /dev/net/tun).
+  if ! tailscale status >/dev/null 2>&1; then
+    command -v systemctl >/dev/null 2>&1 && systemctl enable --now tailscaled >/dev/null 2>&1 || true
+    if ! tailscale status >/dev/null 2>&1; then
+      warn "tailscaled may not be running — on WSL without systemd, start it once: sudo tailscaled --tun=userspace-networking >/tmp/tailscaled.log 2>&1 &"
+    fi
+  fi
+
+  # 3. bring the node up (idempotent). Skip when already logged in; use the auth
+  #    key when supplied; fall back to interactive browser auth from a TTY; and
+  #    fail loud (don't hang) when non-interactive with no key.
+  if tailscale status >/dev/null 2>&1 && ! tailscale status 2>/dev/null | grep -qi 'logged out'; then
+    log "tailscale already up"
+  elif [ -n "$TS_AUTHKEY" ]; then
+    log "tailscale up (auth key)"
+    tailscale up --authkey "$TS_AUTHKEY" || die "tailscale up failed — check the auth key"
+  elif [ -t 0 ] && [ -t 1 ]; then
+    log "tailscale up — authenticate in the browser when the login URL is printed"
+    tailscale up || die "tailscale up failed or was cancelled"
+  else
+    die "tailscale is not logged in and no --ts-authkey was given (non-interactive run). Mint a key at https://login.tailscale.com/admin/settings/keys and re-run with --ts-authkey <key>, or run 'sudo tailscale up' first."
+  fi
 }
 
 # Map a runtime id to "<binary> <install-command>". Unknown id → non-zero.
@@ -589,6 +644,8 @@ while [ $# -gt 0 ]; do
     --image)        IMAGE="${2:-}"; shift 2 ;;
     --password)     PASSWORD="${2:-}"; shift 2 ;;
     --trust-proxy)  TRUST_PROXY="true"; shift ;;
+    --tailscale)    TAILSCALE="true"; shift ;;
+    --ts-authkey)   TS_AUTHKEY="${2:-}"; shift 2 ;;
     --no-bootstrap) BOOTSTRAP="false"; shift ;;
     --no-caveman)   CAVEMAN="false"; shift ;;
     --no-rtk)       RTK="false"; shift ;;
@@ -602,8 +659,10 @@ done
 
 command -v curl >/dev/null 2>&1 || die "curl not found in PATH"
 
-# ── host default: dash.<primary-ip>.nip.io ──
-if [ -z "$HOST" ]; then
+# ── host default: dash.<primary-ip>.nip.io. With --tailscale we instead use the
+# node's MagicDNS name, resolved after `tailscale up` (the daemon must be up to
+# know it), so leave HOST empty here in that case. ──
+if [ -z "$HOST" ] && [ "$TAILSCALE" != "true" ]; then
   ip="$(detect_ip)"; ip="${ip:-127.0.0.1}"
   HOST="dash.${ip}.nip.io"
   log "no --host given; defaulting to $HOST"
@@ -675,9 +734,21 @@ if [ "$CHECK_ONLY" = "true" ]; then
   else
     sshd_status="$([ "$BOOTSTRAP" = true ] && echo "absent (would install)" || echo "absent — clone/agents won't run")"
   fi
-  log "check: host=$HOST, image=$IMAGE, auth=license-session, identity=${identity:-none}, bootstrap=$BOOTSTRAP"
+  if [ "$TAILSCALE" = "true" ]; then
+    if command -v tailscale >/dev/null 2>&1; then
+      if tailscale status >/dev/null 2>&1; then
+        tailscale status 2>/dev/null | grep -qi 'logged out' && ts_status="installed, logged out (would run 'up')" || ts_status="installed, up (would serve)"
+      else
+        ts_status="installed, daemon down (would start)"
+      fi
+    else
+      ts_status="$([ "$BOOTSTRAP" = true ] && echo "absent (would install)" || echo "absent — FAILS without bootstrap")"
+    fi
+  fi
+  log "check: host=${HOST:-<MagicDNS auto>}, image=$IMAGE, auth=license-session, identity=${identity:-none}, bootstrap=$BOOTSTRAP"
   log "       docker=$docker_status, stack_web=$net_status, compose=$compose_status"
   log "       git=$git_status, node=$node_status"
+  [ "$TAILSCALE" = "true" ] && log "       tailscale=$ts_status (serve https→443→127.0.0.1:3001, Funnel OFF)"
   ws_status="$([ -d "$WORKSPACE_DIR" ] && echo "owner=$(stat -c '%U' "$WORKSPACE_DIR" 2>/dev/null || echo '?')" || echo "$([ "$BOOTSTRAP" = true ] && echo "absent (would create)" || echo "absent — clone fails")")"
   log "       executor($EXECUTOR_USER)=$exec_user_status, sshd=$sshd_status, workspace=$ws_status"
   log "       runtimes: $runtimes_status"
@@ -703,6 +774,23 @@ require_root_for_bootstrap
 ensure_docker
 ensure_host_tooling
 ensure_stack
+
+# ── Tailscale: install + bring the node up (serve happens after the stack is up) ──
+ensure_tailscale
+
+# With --tailscale and no explicit --host, use the node's MagicDNS name (now that
+# the daemon is up). Needs jq to read `tailscale status --json`; install it under
+# bootstrap when missing.
+if [ "$TAILSCALE" = "true" ] && [ -z "$HOST" ]; then
+  if ! command -v jq >/dev/null 2>&1 && [ "$BOOTSTRAP" = "true" ] && command -v apt-get >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq jq >/dev/null 2>&1 || true
+  fi
+  if command -v jq >/dev/null 2>&1; then
+    HOST="$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName // empty' | sed 's/\.$//')"
+  fi
+  [ -n "$HOST" ] || die "could not auto-detect the MagicDNS name — pass --host <name>.<tailnet>.ts.net (or install jq)"
+  log "using MagicDNS host $HOST"
+fi
 
 # One-liner support: when piped (curl ... | bash) compose.prod.yml is not on
 # disk. Fetch it from the bootstrap repo and print its sha256 — verify before
@@ -796,6 +884,21 @@ else
   warn "      docker compose -p stack -f $DIR/stack.compose.yml down && docker network rm stack_web && docker compose -p stack -f $DIR/stack.compose.yml up -d"
   warn "then re-check: curl -fsS http://$HOST/api/health"
 fi
+
+# ── Tailscale Serve: front the loopback port with HTTPS on the tailnet. Serve
+# (L7) terminates TLS and injects the Tailscale-User-Login identity header;
+# Funnel stays OFF so nothing is exposed to the public internet. Reachable from
+# any device on the tailnet at https://$HOST. ──
+if [ "$TAILSCALE" = "true" ]; then
+  log "exposing over Tailscale Serve (https://$HOST → 127.0.0.1:3001; Funnel OFF)"
+  if tailscale serve --bg --https=443 http://127.0.0.1:3001; then
+    log "tailscale serve active — reachable from any device on your tailnet at https://$HOST"
+  else
+    warn "tailscale serve failed — once Tailscale is up, run it manually:"
+    warn "  sudo tailscale serve --bg --https=443 http://127.0.0.1:3001"
+  fi
+fi
+
 if [ -n "$LICENSE" ]; then
   log "open the dashboard and log in with your license key"
 else
