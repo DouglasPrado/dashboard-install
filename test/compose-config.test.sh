@@ -45,6 +45,11 @@ assert_rendered "pids_limit rendered" 'pids_limit:'
 assert_rendered "cap_drop ALL rendered" '^\s*-\s*ALL\s*$'
 assert_rendered "healthcheck rendered" 'healthcheck:'
 assert_rendered "healthcheck test rendered" '/api/health'
+# Port published to the host loopback only — lets a host-side reverse proxy
+# (Tailscale Serve, nginx) reach the app without exposing it on a public NIC.
+# `docker compose config` renders ports in long form (host_ip/target/published).
+assert_rendered "port published to loopback" 'host_ip:\s*127\.0\.0\.1'
+assert_rendered "port target is 3001" 'target:\s*3001'
 
 if [ "$fails" -eq 0 ]; then
   echo "PASS (all)"
