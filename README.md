@@ -115,3 +115,18 @@ threat-model facts to weigh before selling licenses:
   limiter, and a leaked key cannot be revoked before it expires. Per-install
   binding or a phone-home activation server is the lever to close this and is
   deferred until the customer base justifies operating that service.
+- **The image is pinned fail-safe, the runtime is not yet.** `compose.prod.yml`
+  refuses to start as root when `.env` is missing (the socket-mounted container
+  must run as the executor uid), and the installer warns when the image is not
+  digest-pinned. **Still open:** the installer pipes several third-party install
+  scripts straight into a root or executor shell (Docker, Tailscale, the agent
+  runtime CLIs, caveman, RTK), unpinned and unverified — a compromise of any of
+  those endpoints is RCE on the host. Pinning each to a release tag/commit plus a
+  `sha256` check is deferred (it needs the upstreams' pinned refs); until then,
+  treat bootstrap as trusting those vendors. `--no-bootstrap` avoids most of them.
+- **The host executor's SSH key is unrestricted.** The dashboard holds a
+  passphrase-less key into the `claude-bots` user, whose `authorized_keys` entry
+  carries no `from=`/`restrict`/forced-command. A leaked key is an interactive
+  shell as the executor (owns `/root/workspace`, traverses `/root`, runs agents).
+  Narrowing the entry is deferred until the dashboard's exact SSH usage (pty,
+  forwarding) is confirmed, so as not to break agent runs.

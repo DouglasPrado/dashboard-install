@@ -103,6 +103,18 @@ valid_host() { # <host>
   esac
 }
 
+# True when the image ref is digest-pinned (...@sha256:<digest>). A floating tag
+# (:latest, :v0.1.0, or a bare repo) is mutable — a compromised or MITM'd
+# registry can swap the image under the same tag. This container mounts the
+# Docker socket (root-equivalent on the host), so an immutable, verifiable
+# digest is the difference between pulling known bytes and trusting the registry.
+image_is_pinned() { # <image-ref>
+  case "$1" in
+    *@sha256:*) return 0 ;;
+    *)          return 1 ;;
+  esac
+}
+
 # Write the license token to <dest> as a secret: mode 600, owned by the executor
 # (the container reads it as that uid over the /data bind). The license is the
 # login credential — never leave it world-readable.
@@ -783,6 +795,7 @@ if [ "$CHECK_ONLY" = "true" ]; then
       ts_status="$([ "$BOOTSTRAP" = true ] && echo "absent (would install)" || echo "absent — FAILS without bootstrap")"
     fi
   fi
+  image_is_pinned "$IMAGE" || warn "image '$IMAGE' is not digest-pinned (mutable tag) — prefer --image ...@sha256:<digest> for the socket-mounted orchestrator"
   log "check: host=${HOST:-<tailscale-ip nip.io>}, image=$IMAGE, auth=license-session, identity=${identity:-none}, bootstrap=$BOOTSTRAP"
   log "       docker=$docker_status, stack_web=$net_status, compose=$compose_status"
   log "       git=$git_status, node=$node_status"
@@ -897,6 +910,11 @@ chmod 600 "$ENV_FILE"
 log "wrote $ENV_FILE (mode 600)"
 
 # ── pull + up ──
+# Warn (don't block) on a mutable image tag. The privileged orchestrator should
+# pull immutable bytes; a floating tag can be swapped by a compromised registry.
+if ! image_is_pinned "$IMAGE"; then
+  warn "image '$IMAGE' is not digest-pinned — a mutable tag can be swapped by a compromised/MITM'd registry, and this container mounts the Docker socket (root-equivalent on the host). Pin a digest: --image ${IMAGE%%:*}@sha256:<digest> (resolve with: docker buildx imagetools inspect $IMAGE)"
+fi
 log "pulling $IMAGE"
 docker pull "$IMAGE"
 log "starting dashboard"

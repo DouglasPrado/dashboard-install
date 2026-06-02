@@ -11,9 +11,14 @@ services:
     # same uid that runs the agent CLI over SSH. Root-owned writes otherwise
     # block the executor with EACCES — empty Consumo tab and failed agent runs —
     # and cap_drop:ALL (below) removes CAP_CHOWN, so the in-process chown-back
-    # fallback can't repair ownership. install.sh captures these from the host;
-    # the :-0 defaults preserve the legacy root run when the vars are unset.
-    user: "${EXECUTOR_UID:-0}:${EXECUTOR_GID:-0}"
+    # fallback can't repair ownership. install.sh captures these into .env.
+    #
+    # Fail closed: this container mounts the Docker socket (root-equivalent on
+    # the host), so silently falling back to uid 0 when .env is absent is a
+    # privilege-escalation foot-gun — a bare `docker compose up` with no .env
+    # would run the socket-bearing container as root. ${VAR:?} makes compose
+    # abort with a clear message instead. Always go through install.sh.
+    user: "${EXECUTOR_UID:?run via install.sh (writes EXECUTOR_UID to .env); refusing to start the docker.sock-mounted container as root}:${EXECUTOR_GID:?run via install.sh (writes EXECUTOR_GID to .env)}"
     group_add:
       # docker.sock is root:docker on the host; a non-root uid needs the host's
       # numeric docker gid to talk to the daemon. Defaults to root's group (0).
