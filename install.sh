@@ -31,6 +31,16 @@
 #                        (DASHBOARD_ADMINS); not required to boot or to log in.
 #   --trust-proxy        Optional. Trust a reverse-proxy identity header as the
 #                        admin-role identity; not required to boot or to log in.
+#   --tailscale          Install Tailscale and make this host a subnet router for
+#                        its LAN, so any device on your tailnet reaches the
+#                        dashboard via Traefik from anywhere — no public IP or
+#                        port-forward. The default host dash.<lan-ip>.nip.io
+#                        resolves to the LAN IP, delivered over the subnet route.
+#                        APPROVE the advertised route once in the Tailscale admin
+#                        console; Funnel stays OFF.
+#   --ts-authkey <key>   Tailscale auth key for an unattended `tailscale up`
+#                        (mint at login.tailscale.com/admin/settings/keys). Omit
+#                        to authenticate interactively in the browser.
 #   --no-bootstrap       Don't install Docker, the stack, or the executor user;
 #                        require them present.
 #   --no-caveman         Skip installing caveman token-compression skill for the
@@ -63,6 +73,7 @@ CURSOR_INSTALL_URL="https://cursor.com/install"
 RUNTIMES_DEFAULT="claude-code,opencode,codex"
 CAVEMAN_INSTALL_URL="https://raw.githubusercontent.com/JuliusBrussee/caveman/main/install.sh"
 RTK_INSTALL_URL="https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh"
+TAILSCALE_INSTALL_URL="https://tailscale.com/install.sh"
 
 HOST=""
 LICENSE=""
@@ -75,6 +86,8 @@ CHECK_ONLY="false"
 RUNTIMES="$RUNTIMES_DEFAULT"
 CAVEMAN="true"
 RTK="true"
+TAILSCALE="false"
+TS_AUTHKEY=""
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mwarn:\033[0m %s\n' "$*" >&2; }
@@ -205,6 +218,76 @@ ensure_stack() {
   fetch "stack.compose.yml" "$DIR/stack.compose.yml"
   fetch "traefik/traefik.yml" "$DIR/traefik/traefik.yml"
   ( cd "$DIR" && docker compose -p stack -f stack.compose.yml up -d ) || die "failed to bring up the stack"
+}
+
+# Detect the primary LAN CIDR to advertise as a subnet route (e.g. 192.168.3.0/24)
+# from the kernel "scope link" route on the default-route interface. Empty when it
+# can't be determined.
+detect_lan_cidr() {
+  local dev
+  dev="$(ip -4 -o route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1)"
+  [ -n "$dev" ] || return 0
+  ip -4 -o route show dev "$dev" scope link 2>/dev/null | awk '{print $1}' | grep -E '/[0-9]+$' | head -1
+}
+
+# Install Tailscale and make this host a SUBNET ROUTER for its LAN, so any device
+# on your tailnet reaches the dashboard (via Traefik, at dash.<lan-ip>.nip.io)
+# from anywhere — no public IP, no port-forward. Enables IPv4 forwarding (a subnet
+# router drops packets without it) and advertises the detected LAN CIDR. Funnel
+# stays OFF. Node auth (`tailscale up`) is OAuth/browser unless --ts-authkey is
+# given, so a piped, non-interactive run needs the key. The advertised route must
+# be APPROVED once in the Tailscale admin console. Idempotent; gated by --tailscale.
+ensure_tailscale() {
+  [ "$TAILSCALE" = "true" ] || return 0
+
+  # 1. CLI/daemon
+  if ! command -v tailscale >/dev/null 2>&1; then
+    [ "$BOOTSTRAP" = "true" ] || die "tailscale missing (run without --no-bootstrap to install it, or install Tailscale first)"
+    command -v curl >/dev/null 2>&1 || die "curl is required to install tailscale"
+    log "installing Tailscale"
+    curl -fsSL "$TAILSCALE_INSTALL_URL" | sh || die "tailscale install failed"
+  fi
+
+  # 2. tailscaled must be running. The installer enables it under systemd;
+  #    minimal/WSL hosts without systemd need it started by hand with userspace
+  #    networking (no /dev/net/tun).
+  if ! tailscale status >/dev/null 2>&1; then
+    command -v systemctl >/dev/null 2>&1 && systemctl enable --now tailscaled >/dev/null 2>&1 || true
+    if ! tailscale status >/dev/null 2>&1; then
+      warn "tailscaled may not be running — on WSL without systemd, start it once: sudo tailscaled --tun=userspace-networking >/tmp/tailscaled.log 2>&1 &"
+    fi
+  fi
+
+  # 3. IPv4 forwarding — a subnet router forwards LAN traffic only when the kernel
+  #    has it enabled; otherwise the route is advertised but packets are dropped.
+  if [ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)" != "1" ]; then
+    if [ "$(id -u)" -eq 0 ]; then
+      log "enabling IPv4/IPv6 forwarding (subnet router needs it)"
+      printf 'net.ipv4.ip_forward = 1\nnet.ipv6.conf.all.forwarding = 1\n' > /etc/sysctl.d/99-tailscale.conf 2>/dev/null || true
+      sysctl -p /etc/sysctl.d/99-tailscale.conf >/dev/null 2>&1 || sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+    else
+      warn "IPv4 forwarding is off — enable it so the subnet route works: sudo sysctl -w net.ipv4.ip_forward=1"
+    fi
+  fi
+
+  # 4. advertise the LAN CIDR and bring the node up. Reuse the running login when
+  #    already up (just (re)set the route); else use the auth key, else interactive
+  #    browser auth from a TTY, else fail loud instead of hanging.
+  local cidr; cidr="$(detect_lan_cidr)"
+  [ -n "$cidr" ] || warn "could not detect the LAN CIDR — after install run: sudo tailscale up --advertise-routes=<your-lan>/24"
+  if tailscale status >/dev/null 2>&1 && ! tailscale status 2>/dev/null | grep -qi 'logged out'; then
+    log "tailscale already up; advertising route ${cidr:-<none>}"
+    [ -n "$cidr" ] && { tailscale set --advertise-routes="$cidr" 2>/dev/null \
+      || warn "could not set the route — run: sudo tailscale up --advertise-routes=$cidr"; }
+  elif [ -n "$TS_AUTHKEY" ]; then
+    log "tailscale up (auth key; advertising ${cidr:-<none>})"
+    tailscale up --authkey "$TS_AUTHKEY" ${cidr:+--advertise-routes="$cidr"} || die "tailscale up failed — check the auth key"
+  elif [ -t 0 ] && [ -t 1 ]; then
+    log "tailscale up — authenticate in the browser when the login URL is printed (advertising ${cidr:-<none>})"
+    tailscale up ${cidr:+--advertise-routes="$cidr"} || die "tailscale up failed or was cancelled"
+  else
+    die "tailscale is not logged in and no --ts-authkey was given (non-interactive run). Mint a key at https://login.tailscale.com/admin/settings/keys and re-run with --ts-authkey <key>, or run 'sudo tailscale up --advertise-routes=${cidr:-<lan>/24}' first."
+  fi
 }
 
 # Map a runtime id to "<binary> <install-command>". Unknown id → non-zero.
@@ -589,6 +672,8 @@ while [ $# -gt 0 ]; do
     --image)        IMAGE="${2:-}"; shift 2 ;;
     --password)     PASSWORD="${2:-}"; shift 2 ;;
     --trust-proxy)  TRUST_PROXY="true"; shift ;;
+    --tailscale)    TAILSCALE="true"; shift ;;
+    --ts-authkey)   TS_AUTHKEY="${2:-}"; shift 2 ;;
     --no-bootstrap) BOOTSTRAP="false"; shift ;;
     --no-caveman)   CAVEMAN="false"; shift ;;
     --no-rtk)       RTK="false"; shift ;;
@@ -602,7 +687,8 @@ done
 
 command -v curl >/dev/null 2>&1 || die "curl not found in PATH"
 
-# ── host default: dash.<primary-ip>.nip.io ──
+# ── host default: dash.<primary-ip>.nip.io. With --tailscale this resolves to
+# the LAN IP, reached over the advertised subnet route (Traefik matches Host). ──
 if [ -z "$HOST" ]; then
   ip="$(detect_ip)"; ip="${ip:-127.0.0.1}"
   HOST="dash.${ip}.nip.io"
@@ -675,9 +761,21 @@ if [ "$CHECK_ONLY" = "true" ]; then
   else
     sshd_status="$([ "$BOOTSTRAP" = true ] && echo "absent (would install)" || echo "absent — clone/agents won't run")"
   fi
+  if [ "$TAILSCALE" = "true" ]; then
+    if command -v tailscale >/dev/null 2>&1; then
+      if tailscale status >/dev/null 2>&1; then
+        tailscale status 2>/dev/null | grep -qi 'logged out' && ts_status="installed, logged out (would run 'up')" || ts_status="installed, up (would advertise route)"
+      else
+        ts_status="installed, daemon down (would start)"
+      fi
+    else
+      ts_status="$([ "$BOOTSTRAP" = true ] && echo "absent (would install)" || echo "absent — FAILS without bootstrap")"
+    fi
+  fi
   log "check: host=$HOST, image=$IMAGE, auth=license-session, identity=${identity:-none}, bootstrap=$BOOTSTRAP"
   log "       docker=$docker_status, stack_web=$net_status, compose=$compose_status"
   log "       git=$git_status, node=$node_status"
+  [ "$TAILSCALE" = "true" ] && log "       tailscale=$ts_status (subnet router + Traefik; approve route in admin console)"
   ws_status="$([ -d "$WORKSPACE_DIR" ] && echo "owner=$(stat -c '%U' "$WORKSPACE_DIR" 2>/dev/null || echo '?')" || echo "$([ "$BOOTSTRAP" = true ] && echo "absent (would create)" || echo "absent — clone fails")")"
   log "       executor($EXECUTOR_USER)=$exec_user_status, sshd=$sshd_status, workspace=$ws_status"
   log "       runtimes: $runtimes_status"
@@ -703,6 +801,9 @@ require_root_for_bootstrap
 ensure_docker
 ensure_host_tooling
 ensure_stack
+
+# ── Tailscale: install + make this host a subnet router for its LAN ──
+ensure_tailscale
 
 # One-liner support: when piped (curl ... | bash) compose.prod.yml is not on
 # disk. Fetch it from the bootstrap repo and print its sha256 — verify before
@@ -796,6 +897,15 @@ else
   warn "      docker compose -p stack -f $DIR/stack.compose.yml down && docker network rm stack_web && docker compose -p stack -f $DIR/stack.compose.yml up -d"
   warn "then re-check: curl -fsS http://$HOST/api/health"
 fi
+
+# ── Tailscale subnet route reminder. The node advertises its LAN; the route
+# must be APPROVED once in the admin console before remote devices reach it. ──
+if [ "$TAILSCALE" = "true" ]; then
+  log "Tailscale: this host advertises its LAN as a subnet route."
+  log "  Approve it: https://login.tailscale.com/admin/machines → this host → Edit route settings"
+  log "  Then reach the dashboard from any tailnet device at http://$HOST"
+fi
+
 if [ -n "$LICENSE" ]; then
   log "open the dashboard and log in with your license key"
 else
