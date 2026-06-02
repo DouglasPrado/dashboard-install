@@ -595,6 +595,27 @@ ensure_executor() {
     chown -R "$EXECUTOR_USER:$EXECUTOR_USER" "$home/.claude" 2>/dev/null || true
   fi
 
+  # 1d. host docker group. The dashboard SSHes in as the executor to run
+  #     `docker compose` ON THE HOST — update-live (git pull + restart) and
+  #     branch-switch restart. docker.sock is root:docker, so without group
+  #     membership every host-side compose call dies with "permission denied
+  #     while trying to connect to the docker API at unix:///var/run/docker.sock".
+  #     This is SEPARATE from the container's DOCKER_GID group_add (that only
+  #     grants the in-process socket client inside the container). Idempotent;
+  #     gated on the group existing — a no-op on rootless/podman hosts, where a
+  #     warning points at the manual fix instead.
+  if getent group docker >/dev/null 2>&1; then
+    if id -nG "$EXECUTOR_USER" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+      :
+    else
+      usermod -aG docker "$EXECUTOR_USER" \
+        && log "added $EXECUTOR_USER to the docker group (host-side compose access)" \
+        || warn "failed to add $EXECUTOR_USER to the docker group — host-side 'docker compose' (update-live/restart) will fail with EACCES on docker.sock"
+    fi
+  else
+    warn "no docker group on host — executor can't run host-side 'docker compose' (update-live/restart will hit EACCES); grant $EXECUTOR_USER access to docker.sock manually"
+  fi
+
   # 2. authorize the dashboard's generated key. Prune any prior dashboard-tagged
   #    keys first (comment "dashboard@...") so a regenerated key never leaves a
   #    stale entry that still grants host access, then append the current one once.
