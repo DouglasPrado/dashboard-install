@@ -35,6 +35,33 @@ already present (just installs the dashboard). `--password` / `--trust-proxy`
 are optional and only add an operator identity for admin-role authz; they are
 not required to boot or to log in.
 
+## Reach it from anywhere (Tailscale subnet router)
+
+Pass `--tailscale` to install Tailscale and make the host a **subnet router** for
+its LAN. It enables IP forwarding, advertises the detected LAN CIDR (e.g.
+`192.168.3.0/24`), and brings the node up. The default host
+`dash.<lan-ip>.nip.io` resolves to the LAN IP, delivered to your tailnet over
+that route, and **Traefik** serves it — so you reach the dashboard (and the
+per-session preview subdomains) from any device on your tailnet, anywhere, with
+no public IP or port-forward. **Funnel stays OFF.**
+
+```bash
+sudo ./install.sh --tailscale --license <key> \
+  --image ghcr.io/douglasprado/dashboard-install@sha256:<digest>
+# unattended: provide a Tailscale auth key so `tailscale up` doesn't need a browser
+sudo ./install.sh --tailscale --ts-authkey tskey-auth-... --license <key>
+```
+
+One manual step: **approve the advertised route** in the Tailscale admin console
+(Machines → this host → Edit route settings), and accept routes on the client
+devices. What stays interactive: `tailscale up` without `--ts-authkey`, and each
+runtime's one-time login (`claude /login`, etc.).
+
+Traffic over the tailnet is encrypted by WireGuard, so plain HTTP via Traefik is
+fine here. Firewall is not automated: the executor reaches the host over the
+Docker bridge (not `tailscale0`), so a naive `ufw default deny + allow tailscale0`
+would break agent runs — see the dashboard's `docs/RUNBOOK.md`.
+
 ## Don't pipe blind
 
 `curl | bash` runs code you didn't read. Before trusting it:
