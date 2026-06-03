@@ -9,6 +9,9 @@ on:
 
 jobs:
   test:
+    # The whole suite is platform-agnostic (functions are sourced and their
+    # OS-specific commands stubbed), so the Linux job runs every test, the macOS
+    # twin included.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,3 +25,26 @@ jobs:
             bash "$t" || rc=1
           done
           exit "$rc"
+
+  test-macos:
+    # Run the macOS-specific units on a real Darwin host: bash 3.2 (Apple's
+    # /bin/bash) and the actual `uname -s` the install-macos.sh guard reads. The
+    # network/dscl/lsof probes stay stubbed, so this needs no root or Docker.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run macOS installer units + the shared guards
+        run: |
+          set -euo pipefail
+          rc=0
+          for t in test/*macos*.test.sh test/compose-mounts.test.sh; do
+            echo "── $t"
+            /bin/bash "$t" || rc=1
+          done
+          exit "$rc"
+
+      - name: Syntax-check the installers under Apple's bash 3.2
+        run: |
+          /bin/bash -n install-macos.sh
+          /bin/bash -n install.sh
