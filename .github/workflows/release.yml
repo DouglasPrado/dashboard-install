@@ -62,20 +62,13 @@ jobs:
           clean="${version#v}"
           echo "tag=$version" >> "$GITHUB_OUTPUT"
           echo "version=$clean" >> "$GITHUB_OUTPUT"
-          # Publish the immutable version tag, plus a moving pointer:
-          #   * stable semver (vX.Y.Z) → also move :latest (the update-check target)
-          #   * per-commit edge build (edge-<sha>) → also move :edge (rolling preview)
-          # Skip the pointer for pre-releases (vX.Y.Z-rc.N), the bare `edge`/`latest`
-          # inputs, and any other dashed version. Each main commit thus publishes a
-          # unique, immutable edge-<sha> ref AND advances :edge to it.
+          # Resolve the full tag list (immutable v + clean forms, plus any moving
+          # pointer). Logic lives in ci/resolve-tags.sh, unit-tested by
+          # test/resolve-tags.test.sh.
+          source dashboard-install/ci/resolve-tags.sh
           {
             echo "tags<<EOF"
-            echo "$IMAGE:$version"
-            case "$version" in
-              edge-*)          echo "$IMAGE:edge" ;;
-              latest|edge|*-*) ;;
-              *)               echo "$IMAGE:latest" ;;
-            esac
+            resolve_tags "$version" "$IMAGE"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
