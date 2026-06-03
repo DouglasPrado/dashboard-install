@@ -29,9 +29,16 @@ assert_grep() { # <label> <pattern>
 assert_grep "./data mounted at /data" '^\s*-\s*\./data:/data(\s|$)'
 
 # server/claude.ts reads ~/.claude under /claude/* (projects, plans, sessions,
-# history, settings). The executor home is owned by claude-bots.
-assert_grep "executor /home/claude-bots/.claude mounted at /claude" \
-  '^\s*-\s*/home/claude-bots/\.claude:/claude(\s|$)'
+# history, settings). Parametrized so the macOS installer can point /claude at
+# the admin-user executor's home; the default keeps the Linux contract intact
+# (the claude-bots executor's ~/.claude).
+assert_grep "executor ~/.claude mounted at /claude (default claude-bots)" \
+  '^\s*-\s*\$\{EXECUTOR_CLAUDE_DIR:-/home/claude-bots/\.claude\}:/claude(\s|$)'
+
+# SSH user the dashboard logs into the host as. Parametrized for the macOS
+# admin-user executor; default preserves the Linux claude-bots contract.
+assert_grep "SSH_USER parametrized (default claude-bots)" \
+  '^\s*-\s*SSH_USER=\$\{EXECUTOR_USER:-claude-bots\}\s*$'
 
 # server/clone-project.ts and the workspace executor share /workspace on the host.
 assert_grep "/root/workspace mounted at /workspace" \

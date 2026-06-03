@@ -34,10 +34,13 @@ services:
       # identity for admin-role authz.
       - LICENSE_ENFORCE=true
       # Agent executor: the dashboard SSHes into the host to run `claude` as the
-      # claude-bots user (provisioned by install.sh). These match ssh-exec.ts
-      # defaults; set explicitly so the contract is visible.
+      # executor user (provisioned by install.sh). These match ssh-exec.ts
+      # defaults; set explicitly so the contract is visible. EXECUTOR_USER is
+      # parametrized so the macOS installer can point it at the admin user that
+      # owns Docker Desktop's socket; the default keeps the Linux claude-bots
+      # contract (install-macos.sh writes EXECUTOR_USER to .env).
       - SSH_HOST=host.docker.internal
-      - SSH_USER=claude-bots
+      - SSH_USER=${EXECUTOR_USER:-claude-bots}
       # Pin the license file under /data (matches the ./data:/data mount).
       # Required for older images whose default still resolves via process.cwd().
       - LICENSE_FILE=/data/license.key
@@ -45,9 +48,11 @@ services:
       - ./data:/data
       - /root/workspace:/workspace
       # Executor home — server/claude.ts reads transcripts, plans, sessions,
-      # history and settings from /claude/* (mapped to ~claude-bots/.claude).
+      # history and settings from /claude/* (mapped to the executor's ~/.claude).
       # Without this bind, the chat panel renders empty even after `claude /login`.
-      - /home/claude-bots/.claude:/claude
+      # EXECUTOR_CLAUDE_DIR is parametrized so the macOS installer can mount the
+      # admin user's ~/.claude; the default keeps the Linux claude-bots path.
+      - ${EXECUTOR_CLAUDE_DIR:-/home/claude-bots/.claude}:/claude
       # Docker socket — load-bearing: the dashboard reads it to list/manage
       # containers (docker.ts, docker-logs.ts), exec (docker-exec.ts) and run
       # the security scanners in throwaway containers (security/docker-runner.ts).
