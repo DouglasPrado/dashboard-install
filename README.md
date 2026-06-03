@@ -7,6 +7,7 @@ from the private source repo.
 
 - `install.sh` — the installer (Linux; auto-dispatches to the macOS twin on a Mac)
 - `install-macos.sh` — the macOS-native installer
+- `update.sh` — force a running install to the latest published image
 - `compose.prod.yml` — the dashboard service
 - `stack.compose.yml` + `traefik/traefik.yml` — minimal Traefik + `stack_web` network
 
@@ -35,6 +36,25 @@ curl -sSL https://raw.githubusercontent.com/DouglasPrado/dashboard-install/main/
 already present (just installs the dashboard). `--password` / `--trust-proxy`
 are optional and only add an operator identity for admin-role authz; they are
 not required to boot or to log in.
+
+## Updating
+
+```bash
+# from the install dir (auto-detected if omitted), bumps to the latest image:
+curl -sSL https://raw.githubusercontent.com/DouglasPrado/dashboard-install/main/update.sh | bash
+# or a specific published tag:
+./update.sh --tag v0.5.6
+```
+
+`update.sh` finds the install dir from the running container's Compose labels,
+re-pins `DASHBOARD_IMAGE`, and recreates the container — passing the ref **inline**
+on each compose command so it wins over both an exported `DASHBOARD_IMAGE` shell
+var and a stale digest pin in `.env` (compose substitution otherwise prefers the
+shell var, which silently froze in-place `docker compose pull` updates in the
+field). It then verifies the recreated container reports the new version.
+
+The in-app update button does the same thing server-side; this script is the
+manual fallback (or for hosts running an image older than that fix).
 
 ## macOS
 
