@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+#
+# Dashboard updater — force the running install to the latest published image.
+#
+# Self-locates the install dir from the running container's Compose labels, so
+# operators don't need to remember where it lives. Re-pins DASHBOARD_IMAGE and
+# recreates the container — passing the ref INLINE on each compose command so an
+# exported `DASHBOARD_IMAGE` shell var (which outranks .env in compose variable
+# substitution) or a stale digest pin can't silently keep the old image. Both of
+# those defeated naive `docker compose pull` in the field.
+#
+# Usage:
+#   ./update.sh                       # → :latest, auto-detected install dir
+#   ./update.sh --tag v0.5.6          # pin a specific published tag
+#   ./update.sh --dir /home/me        # explicit install dir
+#   curl -sSL .../update.sh | bash    # one-liner (auto-detect)
+set -uo pipefail
+
+IMAGE_REPO="ghcr.io/douglasprado/dashboard-install"
+IMAGE_DEFAULT="$IMAGE_REPO:latest"
+CONTAINER="dashboard-app"
+COMPOSE_BASENAME="compose.prod.yml"
+
+log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33mwarn:\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+
+# Parse the compose working_dir from a "<working_dir>|<config_files>" inspect
+# line. Echoes the dir, or nothing when the label is absent/blank.
+parse_install_dir() {
+  local line="$1" dir="${1%%|*}"
+  { [ -n "$dir" ] && [ "$dir" != "$line" ]; } && printf '%s\n' "$dir"
+}
+
+# Rewrite (or append, or create) the DASHBOARD_IMAGE pin in an env file.
+pin_image_in_env() {
+  local env_file="$1" ref="$2"
+  if [ -f "$env_file" ] && grep -q '^DASHBOARD_IMAGE=' "$env_file"; then
+    sed -i "s#^DASHBOARD_IMAGE=.*#DASHBOARD_IMAGE=$ref#" "$env_file"
+  else
+    printf 'DASHBOARD_IMAGE=%s\n' "$ref" >> "$env_file"
+  fi
+}
+
+# Version baked into a local image (org.opencontainers.image.version label).
+image_version() {
+  docker image inspect "$1" \
+    --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' 2>/dev/null
+}
+
+usage() {
+  cat <<EOF
+Usage: update.sh [options]
+  --image <ref>   Full image ref to pull (default: $IMAGE_DEFAULT)
+  --tag <tag>     Shorthand for $IMAGE_REPO:<tag>
+  --dir <path>    Install dir holding $COMPOSE_BASENAME + .env (auto-detected if omitted)
+  -h, --help      Show this help
+EOF
+}
+
+# When sourced (tests), stop here so only the helpers above are defined.
+(return 0 2>/dev/null) && return 0
+
+# ─────────────────────────── main ───────────────────────────
+REF="$IMAGE_DEFAULT"
+DIR=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --image) REF="${2:?--image needs a ref}"; shift 2 ;;
+    --tag)   REF="$IMAGE_REPO:${2:?--tag needs a tag}"; shift 2 ;;
+    --dir)   DIR="${2:?--dir needs a path}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown argument: $1 (see --help)" ;;
+  esac
+done
+
+command -v docker >/dev/null 2>&1 || die "docker not found on PATH"
+docker compose version >/dev/null 2>&1 || die "docker compose v2 not available"
+
+# Locate the install dir: explicit --dir, else the running container's compose
+# label, else the current dir if it holds the compose file.
+if [ -z "$DIR" ]; then
+  inspect_line="$(docker inspect "$CONTAINER" \
+    --format '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}|{{ index .Config.Labels "com.docker.compose.project.config_files" }}' 2>/dev/null || true)"
+  DIR="$(parse_install_dir "$inspect_line")"
+fi
+[ -z "$DIR" ] && [ -f "./$COMPOSE_BASENAME" ] && DIR="$(pwd)"
+[ -n "$DIR" ] || die "could not locate the install dir — pass --dir <path>"
+
+COMPOSE_FILE="$DIR/$COMPOSE_BASENAME"
+[ -f "$COMPOSE_FILE" ] || die "$COMPOSE_FILE not found — pass --dir <path>"
+ENV_FILE="$DIR/.env"
+
+before="$(image_version "$(docker inspect "$CONTAINER" --format '{{.Config.Image}}' 2>/dev/null)")"
+log "install dir : $DIR"
+log "pulling     : $REF"
+[ -n "$before" ] && log "running     : v$before"
+
+pin_image_in_env "$ENV_FILE" "$REF"
+
+# Inline DASHBOARD_IMAGE wins over both an exported shell var and .env, so the
+# pull/recreate always target the intended ref.
+( cd "$DIR" && DASHBOARD_IMAGE="$REF" docker compose -f "$COMPOSE_BASENAME" pull ) \
+  || die "image pull failed (auth/network? for a private image run: docker login ghcr.io)"
+( cd "$DIR" && DASHBOARD_IMAGE="$REF" docker compose -f "$COMPOSE_BASENAME" up -d --force-recreate ) \
+  || die "compose up failed — see: docker logs $CONTAINER"
+
+# Confirm the recreated container is running the freshly pulled image.
+after="$(image_version "$REF")"
+running="$(image_version "$(docker inspect "$CONTAINER" --format '{{.Config.Image}}' 2>/dev/null)")"
+if [ -n "$after" ] && [ "$running" = "$after" ]; then
+  log "updated     : v$after  (was ${before:-unknown})"
+  log "done."
+else
+  warn "container is running v${running:-unknown}, expected v${after:-unknown}"
+  warn "inspect: docker logs $CONTAINER  |  docker inspect $CONTAINER --format '{{.Config.Image}}'"
+  exit 1
+fi
