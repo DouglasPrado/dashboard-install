@@ -741,6 +741,22 @@ ensure_executor() {
   done
 }
 
+# ── macOS dispatch: this script provisions a Linux host executor (useradd, sshd
+# over host-gateway, /usr/local/bin symlinks). macOS needs the native twin
+# (dscl, Remote Login, lsof, Homebrew, admin-user executor). Hand off before
+# parsing so the one-liner (curl ... install.sh | bash) keeps working on a Mac:
+# run install-macos.sh next to this script, or fetch it from the bootstrap repo
+# when piped. Forward the original args untouched. ──
+if [ "$(uname -s 2>/dev/null || echo unknown)" = "Darwin" ]; then
+  _macos_sh="$(dirname "$0")/install-macos.sh"
+  if [ ! -f "$_macos_sh" ]; then
+    _macos_sh="$(mktemp -t install-macos)" || die "could not create a temp file for install-macos.sh"
+    curl -fsSL "$BOOTSTRAP_BASE/install-macos.sh" -o "$_macos_sh" \
+      || die "macOS detected but failed to fetch install-macos.sh from $BOOTSTRAP_BASE (set BOOTSTRAP_BASE, or ship it alongside install.sh)"
+  fi
+  exec bash "$_macos_sh" "$@"
+fi
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --host)         HOST="${2:-}"; shift 2 ;;
@@ -874,12 +890,12 @@ fi
 # via useradd, sshd over host-gateway, runtimes symlinked onto /usr/local/bin).
 # That path is Linux-specific. --no-bootstrap is OS-agnostic (just docker compose
 # up against a pre-provisioned executor), so only block bootstrap on non-Linux. ──
+# Darwin already handed off to install-macos.sh above, so anything non-Linux here
+# is a third OS. --no-bootstrap is OS-agnostic (just docker compose up against a
+# pre-provisioned executor), so only block bootstrap.
 OS="$(uname -s 2>/dev/null || echo unknown)"
 if [ "$BOOTSTRAP" = "true" ] && [ "$OS" != "Linux" ]; then
-  case "$OS" in
-    Darwin) die "host provisioning (bootstrap) is Linux-only — the executor model uses useradd, sshd and /usr/local/bin symlinks. On macOS: pre-provision the '$EXECUTOR_USER' user (authorized_keys + runtimes on PATH) and re-run with --no-bootstrap, or run the dashboard on a Linux VM." ;;
-    *)      die "unsupported host OS '$OS' for bootstrap. On Windows, run inside WSL2 (Ubuntu) — Docker Desktop's WSL2 backend is the Linux host the dashboard SSHes into. Native Windows is not supported; pre-provision and use --no-bootstrap on other Unix hosts." ;;
-  esac
+  die "unsupported host OS '$OS' for bootstrap. On Windows, run inside WSL2 (Ubuntu) — Docker Desktop's WSL2 backend is the Linux host the dashboard SSHes into. Native Windows is not supported; pre-provision and use --no-bootstrap on other Unix hosts."
 fi
 
 # ── root preflight: stop a bootstrap-as-non-root invocation BEFORE side effects ──
