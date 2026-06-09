@@ -577,13 +577,18 @@ ensure_executor() {
   chown "$EXECUTOR_USER:$EXECUTOR_GROUP" "$root_target"
 
   # synthetic.conf format: "<name>\t<absolute-target>" makes /name a symlink.
-  # Repoint any stale /root mapping (older installs targeted /var/root).
   local sc=/etc/synthetic.conf
-  if grep -qE '^root[[:space:]]' "$sc" 2>/dev/null && ! grep -qxF "$(printf 'root\t%s' "$root_target")" "$sc" 2>/dev/null; then
-    grep -vE '^root[[:space:]]' "$sc" > "$sc.tmp" 2>/dev/null && mv "$sc.tmp" "$sc"
-  fi
   if ! grep -qxF "$(printf 'root\t%s' "$root_target")" "$sc" 2>/dev/null; then
     log "linking /root -> $root_target via synthetic.conf (sealed macOS root volume)"
+    # Drop any stale /root mapping first (older installs targeted /var/root).
+    # `grep -v` exits non-zero when it filters out EVERY line (synthetic.conf
+    # often held only the root line), so the mv must NOT be gated on its status
+    # — otherwise the stale line survives and our append makes a SECOND `root`
+    # entry, of which macOS honours the first and ignores the repoint.
+    if [ -f "$sc" ]; then
+      grep -vE '^root[[:space:]]' "$sc" > "$sc.tmp" 2>/dev/null || true
+      mv "$sc.tmp" "$sc"
+    fi
     printf 'root\t%s\n' "$root_target" >> "$sc"
     # Apply without a reboot (10.15+); a no-op for an already-existing /root link.
     /System/Library/Filesystems/apfs.fs/Contents/Resources/apfs.util -t >/dev/null 2>&1 || true
