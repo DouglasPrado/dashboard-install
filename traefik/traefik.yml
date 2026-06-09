@@ -1,10 +1,27 @@
 # Distribution Traefik config — routes by Docker labels on the stack_web network.
-# The API/dashboard (:8080) is intentionally NOT enabled here: never expose it
-# on a standalone host (see docs/RUNBOOK.md). HTTP only; terminate TLS at a
-# reverse proxy / Tailscale Serve if you need it.
+#
+# Two entrypoints:
+#   - `web` (:80): published to the host, real ingress for the dashboard SPA/API
+#     and any user-facing routes labelled by app containers.
+#   - `traefik` (:8080): internal-only — bound inside the container, NEVER
+#     port-mapped on the host. Exposes the Traefik API/dashboard so the
+#     dashboard server (same `stack_web` network) can resolve Live preview URLs
+#     via http://stack-traefik:8080. Anyone outside `stack_web` cannot reach it.
+#
+# `api.insecure: true` is the documented Traefik flag for "API without auth on
+# the dedicated entrypoint." It is safe here precisely because :8080 is not
+# bound to the host — only sibling containers on `stack_web` can hit it, and
+# the only such sibling is the dashboard itself. If you ever publish :8080 to
+# the host (don't), gate it behind basic auth or remove this block.
 entryPoints:
   web:
     address: ":80"
+  traefik:
+    address: ":8080"
+
+api:
+  insecure: true
+  dashboard: true
 
 providers:
   docker:

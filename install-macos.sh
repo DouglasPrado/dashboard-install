@@ -661,6 +661,119 @@ ensure_executor() {
   done
 }
 
+# Make /home/claude-bots resolve to the executor's home so the dashboard chat works on macOS.
+#
+# Why this exists:
+#   The shipped dashboard image hard-codes /home/claude-bots/.claude/mcp-askhuman/
+#   when it invokes `claude --mcp-config` on the host (the Linux executor contract).
+#   On macOS the executor is the admin user, not a dedicated claude-bots account,
+#   so that path does not exist as-is and `claude` aborts on chat startup with
+#   "Invalid MCP configuration: MCP config file not found".
+#
+# Why we cannot just `mkdir /home/claude-bots`:
+#   /home on macOS is owned by autofs (auto_home map, see /etc/auto_master). Any
+#   write into /home returns "Operation not supported" while autofs holds it,
+#   regardless of sudo. SIP also makes /etc behavior surprising.
+#
+# Why the auto_home `-fstype=link` route didn't pan out:
+#   automountd on recent macOS rejected the standard Sun symlink-map entry
+#   (`bad location= map=auto_home key=claude-bots`), and the format is not
+#   portable across macOS versions. We need something deterministic on every Mac.
+#
+# What actually works (and ships here):
+#   1. Comment the `/home` line in /etc/auto_master so autofs releases /home.
+#   2. `automount -vc` to apply (no reboot needed).
+#   3. /home becomes a plain firmlink to /System/Volumes/Data/home (writable).
+#   4. `ln -sfn <executor_home> /home/claude-bots` projects the executor's home
+#      at the path the image expects.
+#
+# Outcome:
+#   /home/claude-bots/.claude/mcp-askhuman/{mcp.json,server.mjs} resolves to the
+#   same files the dashboard already writes via the /claude bind mount. Chat
+#   boots, no image change, no executor renaming, no /home/claude-bots account.
+#
+# This function is idempotent and bypasses any pre-existing state: a stray
+# directory, a symlink to the wrong target, an already-disabled autofs entry,
+# or a previous successful run all converge on the desired end-state.
+setup_claude_bots_autofs() {
+  if [ "$BOOTSTRAP" != "true" ]; then
+    warn "skipping /home/claude-bots setup (--no-bootstrap); chat will fail with 'MCP config file not found' until /home/claude-bots -> $(user_home "$EXECUTOR_USER") (disable /home in /etc/auto_master, run 'sudo automount -vc', then 'sudo ln -sfn <home> /home/claude-bots')"
+    return 0
+  fi
+
+  local home; home="$(user_home "$EXECUTOR_USER")"
+  [ -n "$home" ] && [ -d "$home" ] || die "could not resolve home for $EXECUTOR_USER — cannot configure /home/claude-bots"
+
+  # ── 1. Release /home from autofs (idempotent) ─────────────────────────────
+  # Match `/home` followed by whitespace at column 0 so we don't touch unrelated
+  # /home-prefixed entries. Skip cleanly if it's already disabled.
+  if grep -qE '^/home[[:space:]]' /etc/auto_master 2>/dev/null; then
+    log "disabling /home autofs entry in /etc/auto_master"
+    cp /etc/auto_master "/etc/auto_master.dashboard-install.bak.$(date +%s)"
+    # sed -i.bak handles SIP-quirks better than sed -i '' on macOS; .bak is
+    # discarded after success. If this fails, abort hard — without it, /home
+    # stays autofs-managed and the symlink below will return "Operation not
+    # supported" without leaving any trace.
+    if ! sed -i.dashboard-install.bak 's|^/home|#/home|' /etc/auto_master; then
+      die "could not edit /etc/auto_master (SIP-protected or read-only?) — chat fix cannot proceed"
+    fi
+    rm -f /etc/auto_master.dashboard-install.bak
+  else
+    log "/etc/auto_master already has /home disabled — leaving as-is"
+  fi
+
+  # ── 2. Reload automount and confirm /home is no longer autofs ─────────────
+  log "reloading automount (releases /home)"
+  automount -vc >/dev/null 2>&1 || warn "automount reload returned non-zero — continuing"
+
+  # Small mount table check: if /home is still listed as autofs, the reload did
+  # not take effect (very old macOS, or a stuck automountd). Continue anyway —
+  # the next step will surface the real error if writes are still blocked.
+  if mount | grep -qE 'on /home .*autofs'; then
+    warn "/home still appears as autofs — reboot may be required if the symlink step below fails"
+  fi
+
+  # ── 3. Bypass any pre-existing /home/claude-bots state ────────────────────
+  # Cover every shape this path could be in from prior installs or manual fixes:
+  #   - missing: just create the symlink
+  #   - symlink to the right target: leave it
+  #   - symlink to the wrong target: relink (-sfn replaces atomically)
+  #   - real directory (manual mkdir + populated): preserve contents by moving
+  #     them into the executor's ~/.claude, then symlink. Skipped if the dir is
+  #     non-empty AND merging is unsafe — surface a loud warning instead.
+  if [ -L /home/claude-bots ]; then
+    local current_target; current_target="$(readlink /home/claude-bots)"
+    if [ "$current_target" = "$home" ]; then
+      log "/home/claude-bots already points to $home — leaving as-is"
+    else
+      log "repointing /home/claude-bots from $current_target to $home"
+      ln -sfn "$home" /home/claude-bots
+    fi
+  elif [ -d /home/claude-bots ]; then
+    # Real dir present (a previous manual workaround). Only safe to remove if
+    # empty — populated dirs may contain credentials we shouldn't lose.
+    if [ -z "$(ls -A /home/claude-bots 2>/dev/null)" ]; then
+      log "/home/claude-bots is an empty directory — replacing with symlink to $home"
+      rmdir /home/claude-bots
+      ln -sfn "$home" /home/claude-bots
+    else
+      die "/home/claude-bots exists as a non-empty directory — refuse to replace; move its contents into $home/.claude/ first, then re-run"
+    fi
+  elif [ -e /home/claude-bots ]; then
+    die "/home/claude-bots exists but is neither a symlink nor a directory ($(stat -f %HT /home/claude-bots 2>/dev/null)) — investigate and remove manually"
+  else
+    log "creating /home/claude-bots -> $home"
+    ln -sfn "$home" /home/claude-bots
+  fi
+
+  # ── 4. Verify ──────────────────────────────────────────────────────────────
+  if [ ! -e "/home/claude-bots/.claude" ]; then
+    warn "/home/claude-bots/.claude is not reachable after setup — the dashboard will create it on first boot, but verify with: ls /home/claude-bots/.claude/"
+  else
+    log "/home/claude-bots -> $home active (chat MCP config path reachable)"
+  fi
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --host)         HOST="${2:-}"; shift 2 ;;
@@ -826,6 +939,12 @@ fi
 # ── host-side agent executor (authorize key + Remote Login + runtimes) ──
 ensure_executor
 
+# ── /home/claude-bots autofs link (chat MCP config reachability) ──
+# Must run after ensure_executor (which populates ~/.claude) and before the
+# container boot, so the path is live when the dashboard server first writes
+# the askhuman MCP files and the chat first SSHes into the host.
+setup_claude_bots_autofs
+
 # The container runs as the executor uid (compose `user:`), so the data dir must
 # be owned by that user.
 chown -R "$EXECUTOR_USER:$EXECUTOR_GROUP" "$DIR/data"
@@ -876,9 +995,15 @@ ENV_FILE="$DIR/.env"
   # Docker Desktop's privileged mount helper boots before the synthetic /root
   # firmlink is created, so it canonicalizes /root/workspace -> /private/var/root
   # and the bind dies with "mkdir /host_mnt/private/var/root: permission denied".
-  # The executor's SSH clone still uses the hardcoded /root/workspace (the firmlink
-  # resolves fine there) — same directory, just named explicitly for the bind.
   echo "WORKSPACE_BIND=$(user_home "$EXECUTOR_USER")/.dashboard-root/workspace"
+  # WORKSPACE_HOST_DIR: tell the dashboard server the REAL host path so string
+  # comparisons (e.g. git-worktree.ts path-prefix guard) match what the UI sends.
+  # Previously the server hardcoded /root/workspace and the synthetic firmlink
+  # only helped path *resolution*, not *comparison* — worktree removal aborted
+  # with "path fora de /root/workspace/.worktrees" on Mac. Same value as
+  # WORKSPACE_BIND because the executor SSHes in as the admin user, where the
+  # real path is the only one autofs/SIP exposes consistently.
+  echo "WORKSPACE_HOST_DIR=$(user_home "$EXECUTOR_USER")/.dashboard-root/workspace"
   # No DOCKER_GID on macOS: Docker Desktop has no host `docker` group; the
   # socket is reached as the executor (the GUI user). compose defaults group_add
   # to 0, which is harmless here.
