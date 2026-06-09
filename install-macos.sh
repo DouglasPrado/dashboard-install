@@ -160,6 +160,23 @@ require_root_for_bootstrap() {
   { [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; } || die "run via 'sudo' FROM your admin account (the Docker Desktop user) — SUDO_USER must name a non-root admin: Homebrew refuses to run as root and that account becomes the dashboard executor. Don't run as the root user directly."
 }
 
+# Install the compose v2 plugin when the docker CLI is present but `docker compose`
+# is not. Docker Desktop bundles the plugin, but a Homebrew-formula docker CLI (or
+# a Colima/lima engine) ships only the bare CLI. Symlink it into the system plugin
+# dir so BOTH this root bootstrap and the executor's SSH sessions discover it.
+ensure_compose_plugin() {
+  have_brew || die "docker compose v2 plugin missing and Homebrew unavailable — install Docker Desktop (bundles compose) or run 'brew install docker-compose', then re-run"
+  log "docker compose v2 plugin missing — installing docker-compose (brew, as $EXECUTOR_USER)"
+  run_brew install docker-compose || die "docker-compose install failed — install it manually: brew install docker-compose"
+
+  local cbin
+  cbin="$(run_brew --prefix docker-compose 2>/dev/null)/bin/docker-compose"
+  [ -x "$cbin" ] || cbin="$(sudo -H -u "$EXECUTOR_USER" bash -lc 'command -v docker-compose' 2>/dev/null)"
+  [ -n "$cbin" ] && [ -x "$cbin" ] || die "docker-compose installed but its binary was not found — symlink it into /usr/local/lib/docker/cli-plugins/docker-compose manually"
+  mkdir -p /usr/local/lib/docker/cli-plugins
+  ln -sf "$cbin" /usr/local/lib/docker/cli-plugins/docker-compose
+}
+
 # Install Docker Desktop if missing and wait for the engine. Docker Desktop needs
 # a one-time GUI launch to create the socket and accept its terms; bootstrap can
 # install + open it, but the operator may still have to click through first run.
@@ -170,21 +187,31 @@ ensure_docker() {
   fi
   [ "$BOOTSTRAP" = "true" ] || die "docker not reachable — start Docker Desktop (open -a Docker) or install it (run without --no-bootstrap)"
 
+  # Only install + open Desktop if the docker CLI is absent. A CLI that is already
+  # present (brew formula, Colima) may just have its engine down or lack the compose
+  # plugin — don't shell out to a Docker.app that isn't there.
   if ! command -v docker >/dev/null 2>&1; then
     have_brew || die "Homebrew is required to install Docker Desktop — install it first from https://brew.sh, then re-run"
     log "installing Docker Desktop (brew cask, as $EXECUTOR_USER)"
     run_brew install --cask docker || die "Docker Desktop install failed — install it manually from https://www.docker.com/products/docker-desktop"
+    log "starting Docker Desktop (first launch may prompt you to accept the terms)"
+    open -a Docker >/dev/null 2>&1 || true
+  elif ! docker info >/dev/null 2>&1; then
+    log "docker CLI present but engine unreachable — attempting to start Docker Desktop"
+    open -a Docker >/dev/null 2>&1 || true
   fi
 
-  log "starting Docker Desktop (first launch may prompt you to accept the terms)"
-  open -a Docker >/dev/null 2>&1 || true
   local i
   for i in $(seq 1 60); do
     docker info >/dev/null 2>&1 && break
     sleep 2
   done
-  docker info >/dev/null 2>&1 || die "Docker Desktop did not become ready — open Docker.app, accept the terms and wait for it to finish starting, then re-run"
-  docker compose version >/dev/null 2>&1 || die "docker compose v2 not available — update Docker Desktop"
+  docker info >/dev/null 2>&1 || die "Docker engine did not become ready — start your runtime (Docker Desktop: open -a Docker, accept the terms; Colima: colima start) and wait for it, then re-run"
+
+  # Desktop bundles compose v2; a brew-formula CLI or Colima does not. Install it
+  # rather than dying with a misleading "update Docker Desktop".
+  docker compose version >/dev/null 2>&1 || ensure_compose_plugin
+  docker compose version >/dev/null 2>&1 || die "docker compose v2 still unavailable after install — symlink the plugin into /usr/local/lib/docker/cli-plugins/docker-compose manually, then re-run"
 }
 
 # Install the host-side tools the dashboard runs AS THE EXECUTOR over SSH: git
