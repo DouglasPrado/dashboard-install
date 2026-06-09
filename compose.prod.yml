@@ -46,7 +46,10 @@ services:
       - LICENSE_FILE=/data/license.key
     volumes:
       - ./data:/data
-      - /root/workspace:/workspace
+      # WORKSPACE_BIND lets the macOS installer point this at the real /Users path
+      # (Docker Desktop can't bind through the synthetic /root firmlink). Defaults
+      # to /root/workspace, which is correct on Linux where /root is a real dir.
+      - ${WORKSPACE_BIND:-/root/workspace}:/workspace
       # Executor home — server/claude.ts reads transcripts, plans, sessions,
       # history and settings from /claude/* (mapped to the executor's ~/.claude).
       # Without this bind, the chat panel renders empty even after `claude /login`.

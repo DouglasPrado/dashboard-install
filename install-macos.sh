@@ -867,6 +867,13 @@ ENV_FILE="$DIR/.env"
   echo "EXECUTOR_GID=$(id -g "$EXECUTOR_USER")"
   echo "EXECUTOR_USER=$EXECUTOR_USER"
   echo "EXECUTOR_CLAUDE_DIR=$(user_home "$EXECUTOR_USER")/.claude"
+  # WORKSPACE_BIND: bind the REAL workspace path (under /Users), not /root/workspace.
+  # Docker Desktop's privileged mount helper boots before the synthetic /root
+  # firmlink is created, so it canonicalizes /root/workspace -> /private/var/root
+  # and the bind dies with "mkdir /host_mnt/private/var/root: permission denied".
+  # The executor's SSH clone still uses the hardcoded /root/workspace (the firmlink
+  # resolves fine there) — same directory, just named explicitly for the bind.
+  echo "WORKSPACE_BIND=$(user_home "$EXECUTOR_USER")/.dashboard-root/workspace"
   # No DOCKER_GID on macOS: Docker Desktop has no host `docker` group; the
   # socket is reached as the executor (the GUI user). compose defaults group_add
   # to 0, which is harmless here.
