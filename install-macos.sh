@@ -820,8 +820,13 @@ if [ -n "$LICENSE" ]; then
 fi
 
 # ── pull + auto-pin to digest (trust-on-first-use) ──
-log "pulling $IMAGE"
-docker pull "$IMAGE"
+# The dashboard image is published linux/amd64 only. On Apple Silicon the docker
+# default platform is linux/arm64, so an unqualified pull dies with "no matching
+# manifest for linux/arm64". Force amd64 — Docker Desktop runs it under Rosetta.
+DASHBOARD_PLATFORM="linux/amd64"
+export DOCKER_DEFAULT_PLATFORM="$DASHBOARD_PLATFORM"
+log "pulling $IMAGE ($DASHBOARD_PLATFORM)"
+docker pull --platform "$DASHBOARD_PLATFORM" "$IMAGE"
 if _repo_digest="$(docker image inspect --format '{{index .RepoDigests 0}}' "$IMAGE" 2>/dev/null)" && [ -n "$_repo_digest" ]; then
   IMAGE="$(pin_to_digest "$IMAGE" "${_repo_digest##*@}")"
   log "pinned image to digest: $IMAGE"
