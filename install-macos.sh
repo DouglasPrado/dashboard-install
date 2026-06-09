@@ -564,27 +564,39 @@ ensure_executor() {
   fi
   chown "$EXECUTOR_USER:$EXECUTOR_GROUP" "$ak"; chmod 600 "$ak"
 
-  # 2b. workspace: the image clones projects into $WORKSPACE_DIR (a host path
-  #     hardcoded in the image: /root/workspace) but runs git as the executor
-  #     over SSH. The macOS root volume is sealed read-only (SIP), so /root
-  #     can't be mkdir'd. /etc/synthetic.conf is the sanctioned way to add an
-  #     entry at / without disabling SIP: firmlink /root -> root's real home
-  #     (/var/root), then create the workspace under there.
-  if [ ! -d /root ]; then
-    log "/root absent (sealed macOS root volume) — linking /root -> /var/root via synthetic.conf"
-    # synthetic.conf format: "<name>\t<absolute-target>" makes /name a symlink.
-    if ! grep -qE '^root[[:space:]]+/var/root$' /etc/synthetic.conf 2>/dev/null; then
-      printf 'root\t/var/root\n' >> /etc/synthetic.conf
-    fi
-    # Apply without a reboot (10.15+); harmless no-op if it needs one.
+  # 2b. workspace: the image hardcodes /root/workspace as the host path it
+  #     clones into (over SSH as the executor) AND compose.prod.yml bind-mounts
+  #     it into the container. The macOS root volume is sealed read-only (SIP),
+  #     so /root can't be mkdir'd — firmlink it via /etc/synthetic.conf. The
+  #     target MUST be a dir the executor owns under /Users: Docker Desktop's
+  #     file sharing runs as the GUI user and cannot traverse root's home
+  #     (/var/root), so a /var/root target makes `docker compose up` die with
+  #     "mkdir /host_mnt/private/var/root: permission denied" on the bind mount.
+  local root_target="$home/.dashboard-root"
+  mkdir -p "$root_target"
+  chown "$EXECUTOR_USER:$EXECUTOR_GROUP" "$root_target"
+
+  # synthetic.conf format: "<name>\t<absolute-target>" makes /name a symlink.
+  # Repoint any stale /root mapping (older installs targeted /var/root).
+  local sc=/etc/synthetic.conf
+  if grep -qE '^root[[:space:]]' "$sc" 2>/dev/null && ! grep -qxF "$(printf 'root\t%s' "$root_target")" "$sc" 2>/dev/null; then
+    grep -vE '^root[[:space:]]' "$sc" > "$sc.tmp" 2>/dev/null && mv "$sc.tmp" "$sc"
+  fi
+  if ! grep -qxF "$(printf 'root\t%s' "$root_target")" "$sc" 2>/dev/null; then
+    log "linking /root -> $root_target via synthetic.conf (sealed macOS root volume)"
+    printf 'root\t%s\n' "$root_target" >> "$sc"
+    # Apply without a reboot (10.15+); a no-op for an already-existing /root link.
     /System/Library/Filesystems/apfs.fs/Contents/Resources/apfs.util -t >/dev/null 2>&1 || true
   fi
-  [ -d /root ] || die "could not create /root — the macOS root volume is read-only. Added '/root -> /var/root' to /etc/synthetic.conf; reboot once and re-run the installer to apply it."
+  # An existing /root firmlink can't be repointed live (sealed root) — needs a
+  # reboot to re-read synthetic.conf. Fail loud with the exact target.
+  if [ "$(readlink /root 2>/dev/null || true)" != "$root_target" ]; then
+    die "/root must firmlink to $root_target so Docker Desktop can bind-mount the workspace (currently: $(readlink /root 2>/dev/null || echo '<absent>')). Updated /etc/synthetic.conf; reboot once and re-run the installer to apply it."
+  fi
 
   mkdir -p "$WORKSPACE_DIR"
   chown "$EXECUTOR_USER:$EXECUTOR_GROUP" "$WORKSPACE_DIR"
-  chmod 711 /var/root   # o+x: executor can traverse into /root/workspace, can't list the home
-  log "workspace $WORKSPACE_DIR owned by $EXECUTOR_USER (executor can clone)"
+  log "workspace $WORKSPACE_DIR (-> $root_target/workspace) owned by $EXECUTOR_USER"
 
   # 3. sshd: macOS ships sshd; enable Remote Login so the container can SSH back
   #    over host.docker.internal. systemsetup may require Full Disk Access in
