@@ -195,10 +195,12 @@ ensure_docker() {
     log "installing Docker Desktop (brew cask, as $EXECUTOR_USER)"
     run_brew install --cask docker || die "Docker Desktop install failed — install it manually from https://www.docker.com/products/docker-desktop"
     log "starting Docker Desktop (first launch may prompt you to accept the terms)"
-    open -a Docker >/dev/null 2>&1 || true
+    # `open` must run in the admin's GUI session, not root's — root has no Aqua
+    # session, so `sudo open -a Docker` silently fails to launch the app.
+    sudo -u "$EXECUTOR_USER" open -a Docker >/dev/null 2>&1 || true
   elif ! docker info >/dev/null 2>&1; then
     log "docker CLI present but engine unreachable — attempting to start Docker Desktop"
-    open -a Docker >/dev/null 2>&1 || true
+    sudo -u "$EXECUTOR_USER" open -a Docker >/dev/null 2>&1 || true
   fi
 
   local i
