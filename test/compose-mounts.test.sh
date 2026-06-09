@@ -41,8 +41,11 @@ assert_grep "SSH_USER parametrized (default claude-bots)" \
   '^\s*-\s*SSH_USER=\$\{EXECUTOR_USER:-claude-bots\}\s*$'
 
 # server/clone-project.ts and the workspace executor share /workspace on the host.
-assert_grep "/root/workspace mounted at /workspace" \
-  '^\s*-\s*/root/workspace:/workspace(\s|$)'
+# Parametrized for the macOS installer (WORKSPACE_BIND points at /Users/<user>/
+# .dashboard-root/workspace because Docker Desktop can't bind through the synthetic
+# /root firmlink); default preserves the Linux contract.
+assert_grep "workspace mounted at /workspace (default /root/workspace)" \
+  '^\s*-\s*\$\{WORKSPACE_BIND:-/root/workspace\}:/workspace(\s|$)'
 
 # host-gateway is required for SSH back to the host executor (claude-bots).
 assert_grep "host.docker.internal mapped to host-gateway" \
