@@ -41,6 +41,12 @@ services:
       # contract (install-macos.sh writes EXECUTOR_USER to .env).
       - SSH_HOST=host.docker.internal
       - SSH_USER=${EXECUTOR_USER:-claude-bots}
+      # Host-side workspace + executor-home paths — read by server/workspace-paths.ts
+      # so every `cd <workspace>/<project>` / path validation works on macOS where
+      # the real paths live under /Users/<user> instead of /root or /home/claude-bots.
+      # Defaults preserve the Linux executor contract; install-macos.sh overrides.
+      - WORKSPACE_HOST_DIR=${WORKSPACE_HOST_DIR:-/root/workspace}
+      - EXECUTOR_CLAUDE_DIR=${EXECUTOR_CLAUDE_DIR:-/home/claude-bots/.claude}
       # Pin the license file under /data (matches the ./data:/data mount).
       # Required for older images whose default still resolves via process.cwd().
       - LICENSE_FILE=/data/license.key
