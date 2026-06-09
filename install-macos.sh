@@ -195,10 +195,12 @@ ensure_docker() {
     log "installing Docker Desktop (brew cask, as $EXECUTOR_USER)"
     run_brew install --cask docker || die "Docker Desktop install failed — install it manually from https://www.docker.com/products/docker-desktop"
     log "starting Docker Desktop (first launch may prompt you to accept the terms)"
-    open -a Docker >/dev/null 2>&1 || true
+    # `open` must run in the admin's GUI session, not root's — root has no Aqua
+    # session, so `sudo open -a Docker` silently fails to launch the app.
+    sudo -u "$EXECUTOR_USER" open -a Docker >/dev/null 2>&1 || true
   elif ! docker info >/dev/null 2>&1; then
     log "docker CLI present but engine unreachable — attempting to start Docker Desktop"
-    open -a Docker >/dev/null 2>&1 || true
+    sudo -u "$EXECUTOR_USER" open -a Docker >/dev/null 2>&1 || true
   fi
 
   local i
@@ -564,11 +566,24 @@ ensure_executor() {
 
   # 2b. workspace: the image clones projects into $WORKSPACE_DIR (a host path
   #     hardcoded in the image: /root/workspace) but runs git as the executor
-  #     over SSH. macOS has no /root, so create it, hand the workspace to the
-  #     executor, and grant traverse (x) on /root without exposing a listing.
+  #     over SSH. The macOS root volume is sealed read-only (SIP), so /root
+  #     can't be mkdir'd. /etc/synthetic.conf is the sanctioned way to add an
+  #     entry at / without disabling SIP: firmlink /root -> root's real home
+  #     (/var/root), then create the workspace under there.
+  if [ ! -d /root ]; then
+    log "/root absent (sealed macOS root volume) — linking /root -> /var/root via synthetic.conf"
+    # synthetic.conf format: "<name>\t<absolute-target>" makes /name a symlink.
+    if ! grep -qE '^root[[:space:]]+/var/root$' /etc/synthetic.conf 2>/dev/null; then
+      printf 'root\t/var/root\n' >> /etc/synthetic.conf
+    fi
+    # Apply without a reboot (10.15+); harmless no-op if it needs one.
+    /System/Library/Filesystems/apfs.fs/Contents/Resources/apfs.util -t >/dev/null 2>&1 || true
+  fi
+  [ -d /root ] || die "could not create /root — the macOS root volume is read-only. Added '/root -> /var/root' to /etc/synthetic.conf; reboot once and re-run the installer to apply it."
+
   mkdir -p "$WORKSPACE_DIR"
   chown "$EXECUTOR_USER:$EXECUTOR_GROUP" "$WORKSPACE_DIR"
-  chmod 711 /root   # o+x: executor can traverse into /root/workspace, can't list /root
+  chmod 711 /var/root   # o+x: executor can traverse into /root/workspace, can't list the home
   log "workspace $WORKSPACE_DIR owned by $EXECUTOR_USER (executor can clone)"
 
   # 3. sshd: macOS ships sshd; enable Remote Login so the container can SSH back
