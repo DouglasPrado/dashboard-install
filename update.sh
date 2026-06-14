@@ -32,14 +32,31 @@ parse_install_dir() {
   { [ -n "$dir" ] && [ "$dir" != "$line" ]; } && printf '%s\n' "$dir"
 }
 
-# Rewrite (or append, or create) the DASHBOARD_IMAGE pin in an env file.
+# Portable .env rewrite (macOS `sed -i` is incompatible with GNU `sed -i`).
+pin_env_value() {
+  local env_file="$1" key="$2" value="$3" tmp
+  tmp="${env_file}.tmp.$$"
+  if [ -f "$env_file" ]; then
+    awk -F= -v key="$key" -v value="$value" '
+      BEGIN { done = 0 }
+      $1 == key { print key "=" value; done = 1; next }
+      { print }
+      END { if (!done) print key "=" value }
+    ' "$env_file" > "$tmp"
+  else
+    printf '%s=%s\n' "$key" "$value" > "$tmp"
+  fi
+  mv "$tmp" "$env_file"
+  chmod 600 "$env_file" 2>/dev/null || true
+}
+
 pin_image_in_env() {
   local env_file="$1" ref="$2"
-  if [ -f "$env_file" ] && grep -q '^DASHBOARD_IMAGE=' "$env_file"; then
-    sed -i "s#^DASHBOARD_IMAGE=.*#DASHBOARD_IMAGE=$ref#" "$env_file"
-  else
-    printf 'DASHBOARD_IMAGE=%s\n' "$ref" >> "$env_file"
-  fi
+  pin_env_value "$env_file" DASHBOARD_IMAGE "$ref"
+}
+
+dashboard_platform() {
+  [ "$(uname -s)" = "Darwin" ] && printf '%s\n' 'linux/amd64'
 }
 
 # Version baked into a local image (org.opencontainers.image.version label).
@@ -98,9 +115,17 @@ log "pulling     : $REF"
 [ -n "$before" ] && log "running     : v$before"
 
 pin_image_in_env "$ENV_FILE" "$REF"
+PLATFORM="$(dashboard_platform || true)"
+if [ -n "$PLATFORM" ]; then
+  export DOCKER_DEFAULT_PLATFORM="$PLATFORM"
+  pin_env_value "$ENV_FILE" DASHBOARD_PLATFORM "$PLATFORM"
+  log "platform    : $PLATFORM"
+fi
 
 # Inline DASHBOARD_IMAGE wins over both an exported shell var and .env, so the
 # pull/recreate always target the intended ref.
+( cd "$DIR" && docker pull "$REF" ) \
+  || die "image pull failed (auth/network? for a private image run: docker login ghcr.io)"
 ( cd "$DIR" && DASHBOARD_IMAGE="$REF" docker compose -f "$COMPOSE_BASENAME" pull ) \
   || die "image pull failed (auth/network? for a private image run: docker login ghcr.io)"
 ( cd "$DIR" && DASHBOARD_IMAGE="$REF" docker compose -f "$COMPOSE_BASENAME" up -d --force-recreate ) \
