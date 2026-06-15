@@ -1045,6 +1045,9 @@ ENV_FILE="$DIR/.env"
   [ -n "$_docker_gid" ] && echo "DOCKER_GID=$_docker_gid"
 } > "$ENV_FILE"
 chmod 600 "$ENV_FILE"
+# Host-side update/restart runs as the executor over SSH, and docker compose
+# reads .env itself. If root keeps this file, in-app updates die on EACCES.
+chown "$EXECUTOR_USER:$EXECUTOR_USER" "$ENV_FILE" 2>/dev/null || true
 log "wrote $ENV_FILE (mode 600)"
 
 # ── up ── (image already pulled and digest-pinned above)
