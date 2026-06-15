@@ -25,8 +25,13 @@
 #                        license is the login credential — every route is gated
 #                        behind a license-key session. Omit to paste the key on
 #                        the first-run login screen instead.
-#   --image <ref>        Image to pull (default: ghcr.io/douglasprado/dashboard-install:latest).
-#                        Prefer a digest pin: ...@sha256:<digest>.
+#   --image <ref>        Image to pull (default: the --channel tag of
+#                        ghcr.io/douglasprado/dashboard-install). Prefer a digest
+#                        pin: ...@sha256:<digest>.
+#   --channel <name>     Update channel the in-app updater tracks: `latest`
+#                        (stable releases, default) or `main` (every merge to
+#                        main). Recorded as DASHBOARD_CHANNEL; the image is still
+#                        digest-pinned at install for the socket-mounted runtime.
 #   --password <pw>      Optional. Adds a basic-auth identity for admin-role authz
 #                        (DASHBOARD_ADMINS); not required to boot or to log in.
 #   --trust-proxy        Optional. Trust a reverse-proxy identity header as the
@@ -76,6 +81,9 @@ TAILSCALE_INSTALL_URL="https://tailscale.com/install.sh"
 HOST=""
 LICENSE=""
 IMAGE="$IMAGE_DEFAULT"
+IMAGE_EXPLICIT="false"   # operator passed --image (skip channel-derived default)
+CHANNEL="latest"         # update channel the in-app updater tracks
+CHANNEL_EXPLICIT="false" # operator passed --channel (overrides --image's tag)
 PASSWORD=""
 TRUST_PROXY="false"
 BOOTSTRAP="true"
@@ -129,6 +137,19 @@ pin_to_digest() { # <image-ref> <sha256:digest>
     *:*) repo="${repo%:*}" ;;        # final segment carries a :tag → strip it
   esac
   printf '%s@%s' "$repo" "$2"
+}
+
+# Extract the :tag from an image ref, or empty when it carries none. Looks only
+# at the final path segment so a registry:port (localhost:5000/img) is not
+# mistaken for a tag; a digest (@sha256:...) is dropped first. Used to derive the
+# update channel (DASHBOARD_CHANNEL) from an explicit --image like repo:main.
+image_tag() { # <image-ref>
+  local ref="${1%@*}"                 # drop @sha256:... if present
+  local last="${ref##*/}"             # final path segment
+  case "$last" in
+    *:*) printf '%s' "${last##*:}" ;; # segment carries a :tag → emit it
+    *)   printf '' ;;
+  esac
 }
 
 # Write the license token to <dest> as a secret: mode 600, owned by the executor
@@ -761,7 +782,8 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --host)         HOST="${2:-}"; shift 2 ;;
     --license)      LICENSE="${2:-}"; shift 2 ;;
-    --image)        IMAGE="${2:-}"; shift 2 ;;
+    --image)        IMAGE="${2:-}"; IMAGE_EXPLICIT="true"; shift 2 ;;
+    --channel)      CHANNEL="${2:-}"; CHANNEL_EXPLICIT="true"; shift 2 ;;
     --password)     PASSWORD="${2:-}"; shift 2 ;;
     --trust-proxy)  TRUST_PROXY="true"; shift ;;
     --tailscale)    TAILSCALE="true"; shift ;;
@@ -776,6 +798,20 @@ while [ $# -gt 0 ]; do
     *)              die "unknown argument: $1 (see --help)" ;;
   esac
 done
+
+# Resolve the update channel and the image to pull. The channel is the tag the
+# in-app updater tracks (written as DASHBOARD_CHANNEL); a digest-pinned ref has
+# no tag, so it must be recorded explicitly. Precedence:
+#   --channel  >  the tag of an explicit --image  >  the default 'latest'.
+if [ "$CHANNEL_EXPLICIT" != "true" ] && [ "$IMAGE_EXPLICIT" = "true" ]; then
+  _img_tag="$(image_tag "$IMAGE")"
+  [ -n "$_img_tag" ] && CHANNEL="$_img_tag"
+fi
+case "$CHANNEL" in
+  ''|*[!A-Za-z0-9._-]*) die "invalid --channel '$CHANNEL' (allowed: letters, digits, . _ -)" ;;
+esac
+# No explicit --image → pull the channel tag of the published image.
+[ "$IMAGE_EXPLICIT" = "true" ] || IMAGE="ghcr.io/douglasprado/dashboard-install:${CHANNEL}"
 
 command -v curl >/dev/null 2>&1 || die "curl not found in PATH"
 
@@ -977,11 +1013,14 @@ else
 fi
 
 # ── .env (no secrets from the distribution; only what the operator supplied) ──
-# DASHBOARD_IMAGE is the digest-pinned ref resolved just above.
+# DASHBOARD_IMAGE is the digest-pinned ref resolved just above. DASHBOARD_CHANNEL
+# is the moving tag the in-app updater compares against (its digest vs the
+# running one) — see server/update in the dashboard repo.
 ENV_FILE="$DIR/.env"
 {
   echo "DASHBOARD_HOST=$HOST"
   echo "DASHBOARD_IMAGE=$IMAGE"
+  echo "DASHBOARD_CHANNEL=$CHANNEL"
   if [ -n "$PASSWORD" ]; then
     echo "DASHBOARD_PASSWORD=$PASSWORD"
   fi

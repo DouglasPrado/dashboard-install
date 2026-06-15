@@ -45,5 +45,16 @@ pin_image_in_env "$tmp" "$REF"
 eq "creates env file when missing" "$(cat "$tmp" 2>/dev/null)" "DASHBOARD_IMAGE=$REF"
 rm -f "$tmp"
 
+# ── env_channel ── (default channel `./update.sh` follows when no --image/--tag)
+tmp="$(mktemp)"
+printf 'DASHBOARD_HOST=x\nDASHBOARD_CHANNEL=main\nFOO=bar\n' > "$tmp"
+eq "reads DASHBOARD_CHANNEL"        "$(env_channel "$tmp")" "main"
+printf 'DASHBOARD_HOST=x\n' > "$tmp"
+eq "defaults to latest when absent" "$(env_channel "$tmp")" "latest"
+printf 'DASHBOARD_CHANNEL=\n' > "$tmp"
+eq "defaults to latest when blank"  "$(env_channel "$tmp")" "latest"
+rm -f "$tmp"
+eq "defaults to latest when no file" "$(env_channel /no/such/.env)" "latest"
+
 if [ "$fails" -eq 0 ]; then echo "PASS (all)"; exit 0; fi
 echo "FAILED: $fails"; exit 1
