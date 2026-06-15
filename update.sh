@@ -10,7 +10,7 @@
 # those defeated naive `docker compose pull` in the field.
 #
 # Usage:
-#   ./update.sh                       # → :latest, auto-detected install dir
+#   ./update.sh                       # → the install's channel (DASHBOARD_CHANNEL)
 #   ./update.sh --tag v0.5.6          # pin a specific published tag
 #   ./update.sh --dir /home/me        # explicit install dir
 #   curl -sSL .../update.sh | bash    # one-liner (auto-detect)
@@ -68,18 +68,29 @@ image_version() {
 usage() {
   cat <<EOF
 Usage: update.sh [options]
-  --image <ref>   Full image ref to pull (default: $IMAGE_DEFAULT)
+  --image <ref>   Full image ref to pull (default: the install's DASHBOARD_CHANNEL, e.g. $IMAGE_DEFAULT)
   --tag <tag>     Shorthand for $IMAGE_REPO:<tag>
   --dir <path>    Install dir holding $COMPOSE_BASENAME + .env (auto-detected if omitted)
   -h, --help      Show this help
 EOF
 }
 
+# Read the configured update channel from an install's .env (DASHBOARD_CHANNEL),
+# defaulting to `latest` when the file or key is absent. Lets `./update.sh` with
+# no args follow whatever channel the install was set up to track (`main` rides
+# every merge; `latest` rides stable releases).
+env_channel() { # <env-file>
+  local f="$1" line=""
+  [ -f "$f" ] && line="$(grep -E '^DASHBOARD_CHANNEL=' "$f" 2>/dev/null | tail -1)"
+  line="${line#DASHBOARD_CHANNEL=}"
+  printf '%s' "${line:-latest}"
+}
+
 # When sourced (tests), stop here so only the helpers above are defined.
 (return 0 2>/dev/null) && return 0
 
 # ─────────────────────────── main ───────────────────────────
-REF="$IMAGE_DEFAULT"
+REF=""   # empty → resolved from the install's channel once .env is located
 DIR=""
 
 while [ $# -gt 0 ]; do
@@ -108,6 +119,9 @@ fi
 COMPOSE_FILE="$DIR/$COMPOSE_BASENAME"
 [ -f "$COMPOSE_FILE" ] || die "$COMPOSE_FILE not found — pass --dir <path>"
 ENV_FILE="$DIR/.env"
+
+# No explicit --image/--tag → follow the channel the install tracks.
+[ -n "$REF" ] || REF="$IMAGE_REPO:$(env_channel "$ENV_FILE")"
 
 before="$(image_version "$(docker inspect "$CONTAINER" --format '{{.Config.Image}}' 2>/dev/null)")"
 log "install dir : $DIR"

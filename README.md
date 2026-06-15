@@ -39,8 +39,13 @@ not required to boot or to log in.
 
 ## Updating
 
+The install tracks an **update channel** (`--channel` at install time, recorded
+as `DASHBOARD_CHANNEL`): `latest` rides stable releases (default), `main` rides
+every merge to main. The in-app updater compares the channel tag's digest to the
+running image and offers an update when they differ.
+
 ```bash
-# from the install dir (auto-detected if omitted), bumps to the latest image:
+# from the install dir (auto-detected if omitted), follows the install's channel:
 curl -sSL https://raw.githubusercontent.com/DouglasPrado/dashboard-install/main/update.sh | bash
 # or a specific published tag:
 ./update.sh --tag v0.5.6
