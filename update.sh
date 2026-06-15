@@ -32,21 +32,24 @@ parse_install_dir() {
   { [ -n "$dir" ] && [ "$dir" != "$line" ]; } && printf '%s\n' "$dir"
 }
 
-# Portable .env rewrite (macOS `sed -i` is incompatible with GNU `sed -i`).
+# Portable .env rewrite. Keep the temp file under /tmp so host-side updates run
+# fine even when the install dir itself is not writable by the executor user.
 pin_env_value() {
   local env_file="$1" key="$2" value="$3" tmp
-  tmp="${env_file}.tmp.$$"
+  tmp="$(mktemp "${TMPDIR:-/tmp}/dashboard-env.XXXXXX")" || return 1
   if [ -f "$env_file" ]; then
     awk -F= -v key="$key" -v value="$value" '
       BEGIN { done = 0 }
       $1 == key { print key "=" value; done = 1; next }
       { print }
       END { if (!done) print key "=" value }
-    ' "$env_file" > "$tmp"
+    ' "$env_file" > "$tmp" || { rm -f "$tmp"; return 1; }
+    cat "$tmp" > "$env_file" || { rm -f "$tmp"; return 1; }
   else
-    printf '%s=%s\n' "$key" "$value" > "$tmp"
+    printf '%s=%s\n' "$key" "$value" > "$tmp" || { rm -f "$tmp"; return 1; }
+    cat "$tmp" > "$env_file" 2>/dev/null || mv "$tmp" "$env_file" || { rm -f "$tmp"; return 1; }
   fi
-  mv "$tmp" "$env_file"
+  rm -f "$tmp"
   chmod 600 "$env_file" 2>/dev/null || true
 }
 
@@ -63,6 +66,32 @@ dashboard_platform() {
 image_version() {
   docker image inspect "$1" \
     --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' 2>/dev/null
+}
+
+# Older Linux installs left .env as root:root 600, but host-side updates run as
+# the non-root executor user over SSH. Repair that in place via the Docker daemon
+# the executor already uses for compose, so the updater can self-heal.
+repair_env_access() {
+  local env_file="$1" image="$2" env_dir env_name uid gid
+  [ -e "$env_file" ] || return 0
+  [ -n "$image" ] || return 1
+  env_dir="$(dirname "$env_file")"
+  env_name="$(basename "$env_file")"
+  uid="$(id -u)"
+  gid="$(id -g)"
+  docker run --rm --entrypoint /bin/sh -u 0:0 \
+    -v "$env_dir:/work" "$image" \
+    -ceu "chown $uid:$gid \"/work/$env_name\" && chmod 600 \"/work/$env_name\"" \
+    >/dev/null 2>&1
+}
+
+ensure_env_access() {
+  local env_file="$1" image="$2"
+  [ ! -e "$env_file" ] && return 0
+  [ -r "$env_file" ] && [ -w "$env_file" ] && return 0
+  warn "$env_file is not readable+writable by $(id -un); attempting a one-time ownership repair via docker"
+  repair_env_access "$env_file" "$image" || return 1
+  [ -r "$env_file" ] && [ -w "$env_file" ]
 }
 
 usage() {
@@ -123,26 +152,31 @@ ENV_FILE="$DIR/.env"
 # No explicit --image/--tag → follow the channel the install tracks.
 [ -n "$REF" ] || REF="$IMAGE_REPO:$(env_channel "$ENV_FILE")"
 
-before="$(image_version "$(docker inspect "$CONTAINER" --format '{{.Config.Image}}' 2>/dev/null)")"
+CURRENT_IMAGE="$(docker inspect "$CONTAINER" --format '{{.Config.Image}}' 2>/dev/null || true)"
+before="$(image_version "$CURRENT_IMAGE")"
 log "install dir : $DIR"
 log "pulling     : $REF"
 [ -n "$before" ] && log "running     : v$before"
 
-pin_image_in_env "$ENV_FILE" "$REF"
+ensure_env_access "$ENV_FILE" "$CURRENT_IMAGE" \
+  || die "$ENV_FILE is not readable+writable by $(id -un), and the docker ownership repair failed. Re-run install.sh or chown the file to the executor user."
+pin_image_in_env "$ENV_FILE" "$REF" \
+  || die "failed to update $ENV_FILE"
 PLATFORM="$(dashboard_platform || true)"
 if [ -n "$PLATFORM" ]; then
   export DOCKER_DEFAULT_PLATFORM="$PLATFORM"
-  pin_env_value "$ENV_FILE" DASHBOARD_PLATFORM "$PLATFORM"
+  pin_env_value "$ENV_FILE" DASHBOARD_PLATFORM "$PLATFORM" \
+    || die "failed to update $ENV_FILE with DASHBOARD_PLATFORM"
   log "platform    : $PLATFORM"
 fi
 
 # Inline DASHBOARD_IMAGE wins over both an exported shell var and .env, so the
 # pull/recreate always target the intended ref.
-( cd "$DIR" && docker pull "$REF" ) \
+docker pull "$REF" \
   || die "image pull failed (auth/network? for a private image run: docker login ghcr.io)"
-( cd "$DIR" && DASHBOARD_IMAGE="$REF" docker compose -f "$COMPOSE_BASENAME" pull ) \
+DASHBOARD_IMAGE="$REF" docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" pull \
   || die "image pull failed (auth/network? for a private image run: docker login ghcr.io)"
-( cd "$DIR" && DASHBOARD_IMAGE="$REF" docker compose -f "$COMPOSE_BASENAME" up -d --force-recreate ) \
+DASHBOARD_IMAGE="$REF" docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --force-recreate \
   || die "compose up failed — see: docker logs $CONTAINER"
 
 # Confirm the recreated container is running the freshly pulled image.

@@ -37,6 +37,7 @@ assert_grep "pin_image_in_env preserves unrelated lines" '^OTHER=value$' "$ENV_F
 
 pin_env_value "$ENV_FILE" DASHBOARD_PLATFORM "linux/amd64"
 assert_grep "pin_env_value appends missing keys portably" '^DASHBOARD_PLATFORM=linux/amd64$' "$ENV_FILE"
+assert_grep "install.sh hands .env to the executor for host-side updates" 'chown "\$EXECUTOR_USER:\$EXECUTOR_USER" "\$ENV_FILE"' "$SCRIPT_DIR/../install.sh"
 
 uname() { echo Darwin; }
 assert_eq "dashboard_platform forces amd64 on macOS" "$(dashboard_platform)" "linux/amd64"
