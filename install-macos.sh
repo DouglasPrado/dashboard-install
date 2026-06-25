@@ -266,6 +266,33 @@ ensure_host_tooling() {
   command -v node >/dev/null 2>&1 && log "node ready ($(node --version 2>/dev/null))"
 }
 
+# Install nixpacks — the default build engine for ephemeral Environments (the
+# dashboard runs `nixpacks build` on the host as the executor over SSH; see the
+# server's build-image.ts). Like git/node, a non-interactive ssh session doesn't
+# get the brew prefix on PATH, so symlink it onto /usr/local/bin. Homebrew, gated
+# by bootstrap; non-fatal — repos with their own docker-compose.yml don't need it.
+ensure_nixpacks() {
+  if command -v nixpacks >/dev/null 2>&1; then
+    log "nixpacks present ($(nixpacks --version 2>/dev/null))"
+    return 0
+  fi
+  if [ "$BOOTSTRAP" != "true" ]; then
+    warn "nixpacks missing — Environments in nixpacks mode need it (run without --no-bootstrap to install, or: brew install nixpacks). Repos with their own docker-compose.yml don't need it."
+    return 0
+  fi
+  if ! have_brew; then
+    warn "Homebrew unavailable — install nixpacks manually (brew install nixpacks). Environments in nixpacks mode need it."
+    return 0
+  fi
+  log "installing nixpacks (brew, as $EXECUTOR_USER) — default build engine for Environments"
+  run_brew install nixpacks || { warn "failed to install nixpacks — Environments in nixpacks mode will fail until it's on the host PATH (brew install nixpacks)"; return 0; }
+  # Expose on /usr/local/bin so the executor's non-interactive ssh session finds it.
+  mkdir -p /usr/local/bin
+  local src; src="$(sudo -H -u "$EXECUTOR_USER" bash -lc 'command -v nixpacks' 2>/dev/null || true)"
+  [ -n "$src" ] && [ -x "$src" ] && [ "$src" != "/usr/local/bin/nixpacks" ] && ln -sf "$src" /usr/local/bin/nixpacks
+  command -v nixpacks >/dev/null 2>&1 && log "nixpacks ready ($(nixpacks --version 2>/dev/null))"
+}
+
 # Create the stack_web network + minimal Traefik if absent. OS-agnostic (docker
 # compose), identical to the Linux twin.
 ensure_stack() {
@@ -833,6 +860,7 @@ if [ "$CHECK_ONLY" = "true" ]; then
   git_status="$(command -v git >/dev/null 2>&1 && echo "present ($(git --version 2>/dev/null | awk '{print $3}'))" || echo "$([ "$BOOTSTRAP" = true ] && echo "absent (would install)" || echo "absent — clone/preview FAIL")")"
   node_status="$(command -v node >/dev/null 2>&1 && echo "present ($(node -v 2>/dev/null))" || echo "$([ "$BOOTSTRAP" = true ] && echo "absent (would install $NODE_MAJOR.x)" || echo "absent — agent local dev tooling won't run")")"
   brew_status="$(have_brew && echo "present ($(brew_bin))" || echo "absent — needed to install Docker/git/node; get it at https://brew.sh")"
+  nixpacks_status="$(command -v nixpacks >/dev/null 2>&1 && echo "present ($(nixpacks --version 2>/dev/null))" || echo "$([ "$BOOTSTRAP" = true ] && echo "absent (would install)" || echo "absent — Environments in nixpacks mode FAIL")")"
   if [ -f "$COMPOSE_FILE" ]; then
     compose_status="local"
   elif curl -fsIL "$COMPOSE_URL" >/dev/null 2>&1; then
@@ -884,7 +912,7 @@ if [ "$CHECK_ONLY" = "true" ]; then
   image_is_pinned "$IMAGE" || warn "image '$IMAGE' is not digest-pinned (mutable tag) — prefer --image ...@sha256:<digest> for the socket-mounted orchestrator"
   log "check: host=${HOST:-<tailscale-ip nip.io>}, image=$IMAGE, auth=license-session, identity=${identity:-none}, bootstrap=$BOOTSTRAP"
   log "       docker=$docker_status, stack_web=$net_status, compose=$compose_status, brew=$brew_status"
-  log "       git=$git_status, node=$node_status"
+  log "       git=$git_status, node=$node_status, nixpacks=$nixpacks_status"
   [ "$TAILSCALE" = "true" ] && log "       tailscale=$ts_status (Traefik http→dash.<ts-ip>.nip.io, Funnel OFF)"
   ws_status="$([ -d "$WORKSPACE_DIR" ] && echo "owner=$(stat -f '%Su' "$WORKSPACE_DIR" 2>/dev/null || echo '?')" || echo "$([ "$BOOTSTRAP" = true ] && echo "absent (would create)" || echo "absent — clone fails")")"
   log "       executor($EXECUTOR_USER)=$exec_user_status, sshd=$sshd_status, workspace=$ws_status"
@@ -904,6 +932,7 @@ require_root_for_bootstrap
 # ── bootstrap: Docker Desktop, host tooling (git/node), then the shared stack ──
 ensure_docker
 ensure_host_tooling
+ensure_nixpacks
 ensure_stack
 
 # ── Tailscale: install + bring the node up ──

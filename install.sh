@@ -272,6 +272,28 @@ ensure_host_tooling() {
   command -v node >/dev/null 2>&1 && log "node ready ($(node --version 2>/dev/null))"
 }
 
+# Install nixpacks — the default build engine for ephemeral Environments (the
+# dashboard runs `nixpacks build` on the host as the executor over SSH; see the
+# server's build-image.ts). The official installer drops the binary in
+# /usr/local/bin, which IS on the non-interactive ssh PATH (the same reason the
+# dashboard prepends /usr/local/bin to its executor scripts). Gated by bootstrap;
+# non-fatal — repos that ship their own docker-compose.yml don't need it.
+ensure_nixpacks() {
+  if command -v nixpacks >/dev/null 2>&1; then
+    log "nixpacks present ($(nixpacks --version 2>/dev/null))"
+    return 0
+  fi
+  if [ "$BOOTSTRAP" != "true" ]; then
+    warn "nixpacks missing — Environments in nixpacks mode need it (run without --no-bootstrap to install, or: curl -fsSL https://nixpacks.com/install.sh | bash). Repos with their own docker-compose.yml don't need it."
+    return 0
+  fi
+  command -v curl >/dev/null 2>&1 || { warn "curl unavailable — install nixpacks manually: https://nixpacks.com"; return 0; }
+  log "installing nixpacks (default build engine for Environments)"
+  curl -fsSL https://nixpacks.com/install.sh | bash >/dev/null 2>&1 \
+    || warn "failed to install nixpacks — Environments in nixpacks mode will fail until it's on the host PATH (install: curl -fsSL https://nixpacks.com/install.sh | bash)"
+  command -v nixpacks >/dev/null 2>&1 && log "nixpacks ready ($(nixpacks --version 2>/dev/null))"
+}
+
 # Create the stack_web network + minimal Traefik if the network is absent.
 ensure_stack() {
   if docker network inspect stack_web >/dev/null 2>&1; then
@@ -860,6 +882,7 @@ if [ "$CHECK_ONLY" = "true" ]; then
   # agent-driven local dev tooling. Without bootstrap, missing git == clone/preview break.
   git_status="$(command -v git >/dev/null 2>&1 && echo "present ($(git --version 2>/dev/null | awk '{print $3}'))" || echo "$([ "$BOOTSTRAP" = true ] && echo "absent (would install)" || echo "absent — clone/preview FAIL")")"
   node_status="$(command -v node >/dev/null 2>&1 && echo "present ($(node -v 2>/dev/null))" || echo "$([ "$BOOTSTRAP" = true ] && echo "absent (would install $NODE_MAJOR.x)" || echo "absent — agent local dev tooling won't run")")"
+  nixpacks_status="$(command -v nixpacks >/dev/null 2>&1 && echo "present ($(nixpacks --version 2>/dev/null))" || echo "$([ "$BOOTSTRAP" = true ] && echo "absent (would install)" || echo "absent — Environments in nixpacks mode FAIL")")"
   if [ -f "$COMPOSE_FILE" ]; then
     compose_status="local"
   elif curl -fsIL "$COMPOSE_URL" >/dev/null 2>&1; then
@@ -914,7 +937,7 @@ if [ "$CHECK_ONLY" = "true" ]; then
   image_is_pinned "$IMAGE" || warn "image '$IMAGE' is not digest-pinned (mutable tag) — prefer --image ...@sha256:<digest> for the socket-mounted orchestrator"
   log "check: host=${HOST:-<tailscale-ip nip.io>}, image=$IMAGE, auth=license-session, identity=${identity:-none}, bootstrap=$BOOTSTRAP"
   log "       docker=$docker_status, stack_web=$net_status, compose=$compose_status"
-  log "       git=$git_status, node=$node_status"
+  log "       git=$git_status, node=$node_status, nixpacks=$nixpacks_status"
   [ "$TAILSCALE" = "true" ] && log "       tailscale=$ts_status (Traefik http→dash.<ts-ip>.nip.io, Funnel OFF)"
   ws_status="$([ -d "$WORKSPACE_DIR" ] && echo "owner=$(stat -c '%U' "$WORKSPACE_DIR" 2>/dev/null || echo '?')" || echo "$([ "$BOOTSTRAP" = true ] && echo "absent (would create)" || echo "absent — clone fails")")"
   log "       executor($EXECUTOR_USER)=$exec_user_status, sshd=$sshd_status, workspace=$ws_status"
@@ -940,6 +963,7 @@ require_root_for_bootstrap
 # ── bootstrap: Docker, host tooling (git/node), then the shared stack ──
 ensure_docker
 ensure_host_tooling
+ensure_nixpacks
 ensure_stack
 
 # ── Tailscale: install + bring the node up ──
